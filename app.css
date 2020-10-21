@@ -82,6 +82,10 @@ footer::before{
     width: 120%;
     left: -10%;
 }
+body {
+    margin-top: 2rem;
+    margin-bottom: 5rem;
+}
 body pre {
     -webkit-user-select: all;
     -moz-user-select: all;
