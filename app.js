@@ -135,7 +135,7 @@ rerum.controller('readManifestController', function ($scope, $http, $sce, obj, c
         $scope.screen.viewing = $scope.screen.views[$scope.screen.viewing];
     };
     $scope.getUniverse = function () {
-        return $http.get('http://ryanfb.github.io/iiif-universe/iiif-universe.json').then(function (res) {
+        return $http.get('https://ryanfb.github.io/iiif-universe/iiif-universe.json').then(function (res) {
             checkResponse(res.data);
             $scope.universe = res.data;
             if (!$scope.universe.collections || $scope.universe.collections.length === 0) {

@@ -511,7 +511,7 @@ angular.module('utils', [])
                         $element.attr('src', $scope.canvas.images[0].resource['@id']);
                     });
                     img.crossOrigin = "anonymous";
-                    img.src = src;
+                    img.src = src.replace(/^https?:/,'');
                 };
                 $scope.$watch('selector', $scope.updateCrop);
                 $scope.$watch('resized-canvas', $scope.updateCrop);
@@ -523,10 +523,10 @@ angular.module('utils', [])
             restrict: 'A',
             link: function(scope, element, attrs) {
                 if (!attrs.ngSrc.length) {
-                    element.attr('src', attrs.fallbackSrc);
+                    element.attr('src', attrs.fallbackSrc.replace(/^https?:/,''));
                 }
                 element.on('error', function() {
-                    element.attr('src', attrs.fallbackSrc);
+                    element.attr('src', attrs.fallbackSrc.replace(/^https?:/,''));
                 });
             }
         };
