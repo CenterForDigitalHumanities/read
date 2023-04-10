@@ -508,7 +508,7 @@ angular.module('utils', [])
                     angular.element(img).one('error', function(event) {
                         // CORS H8, probably, load tainted canvas
                         $element.one('load', loaded);
-                        $element.attr('src', $scope.canvas.images[0].resource['@id']);
+                        $element.attr('src', $scope.canvas.images[0].resource['@id']?.replace(/^https?:/,''));
                     });
                     img.crossOrigin = "anonymous";
                     img.src = src.replace(/^https?:/,'');
