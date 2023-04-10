@@ -13,7 +13,7 @@ rerum.config(['$routeProvider',
                     obj: function ($location, $http, rerumService) {
                         // TODO: preload a known manifest from the URL or memory
                         var mUrl = $location.search().url;
-                        var manifest = (mUrl && $http.get(mUrl).then(function (m) {
+                        var manifest = (mUrl && $http.get(mUrl?.replace(/^https?:/,'')).then(function (m) {
                             // success
                             rerumService.extractResources(m.data);
                             return m.data;
@@ -77,6 +77,10 @@ rerum.controller('readManifestController', function ($scope, $http, $sce, obj, c
         });
     }
     $scope.trust = function (body) {
+        if (typeof body !== "string") {
+            body = $scope.getValue({body})
+        }
+        if (!body) { return `` }
         return $sce.trustAsHtml(body);
     };
 
@@ -144,7 +148,7 @@ rerum.controller('readManifestController', function ($scope, $http, $sce, obj, c
                     code: 200
                 });
             }
-        }, showError);
+        }, function(err){ $scope.universe = null });
     };
     $scope.updateCollection = function (collectionID) {
         $scope.collection = $http.get(collectionID).then(function (res) {

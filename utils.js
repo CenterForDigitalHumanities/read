@@ -242,7 +242,7 @@ angular.module('utils', [])
             // if (typeof uri !== "string" || !validationService.validateURI(uri)) {
             //     throw Error(uri + " does not appear to be a valid URI");
             // }
-            return $http.get(uri);
+            return $http.get(uri?.replace(/^https?:/,''));
         };
         this.getResource = function(res) {
             if (angular.isObject(res) || !res) {
@@ -410,7 +410,7 @@ angular.module('utils', [])
             if (angular.isArray(uri)) {
                 return $q.all(uri.map(service.resolve));
             }
-            return $http.get(uri)
+            return $http.get(uri?.replace(/^https?:/,''))
                 .success(function(res) {
                     return res;
                 }).error(function(err) {
@@ -465,8 +465,8 @@ angular.module('utils', [])
                     var img = cache.get("img" + $scope.canvas['@id']) || new Image();
                     var imgSelectorIndex = $scope.canvas.images[0].resource['@id'].indexOf("#");
                     var src = (imgSelectorIndex > -1) ?
-                        $scope.canvas.images[0].resource['@id'].substring(0, imgSelectorIndex) :
-                        $scope.canvas.images[0].resource['@id'];
+                        $scope.canvas.images[0].resource['@id'].substring(0, imgSelectorIndex)?.replace(/^https?:/,'') :
+                        $scope.canvas.images[0].resource['@id']?.replace(/^https?:/,'');
                     var imgTrim = (imgSelectorIndex > -1) ?
                         $scope.canvas.images[0].resource['@id'].substring(imgSelectorIndex + 6).split(",") // #xywh=
                         :
