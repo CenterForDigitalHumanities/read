@@ -213,6 +213,9 @@ pre-hash query string, which Angular's `$location.search()` could not see.
 - `copyLink` copies the chosen URL; `downloadCrop` downloads the cropped PNG.
 - `cropImage` in `utils.js` draws the region to a canvas (CORS `anonymous`), with
   a tainted-canvas fallback that returns the canvas element for display.
+- Selecting an annotation (`selectAnnotation`) updates the URL and toggles the
+  `focused` class **in place** — it does not re-render the viewer or re-crop the
+  line images, so clicking through many segments stays fast.
 
 **Why**
 

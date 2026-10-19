@@ -86,7 +86,7 @@ class ReadViewer extends HTMLElement {
       case 'download-crop': this.downloadCrop(); break;
       case 'reload-universe': this.loadUniverse(); break;
       case 'clear': this.clear(); break;
-      case 'select-annotation': this.state.focusAnnotation = el.dataset.anno || null; this.refresh(); break;
+      case 'select-annotation': this.selectAnnotation(el.dataset.anno || null); break;
     }
   }
 
@@ -279,6 +279,15 @@ class ReadViewer extends HTMLElement {
   refresh() {
     this.updateUrl();
     this.render();
+    this.focusAnnotationElement();
+  }
+
+  selectAnnotation(id) {
+    this.state.focusAnnotation = id || null;
+    this.updateUrl();
+    for (const el of this.querySelectorAll('[data-anno]')) {
+      el.classList.toggle('focused', !!id && el.dataset.anno === id);
+    }
     this.focusAnnotationElement();
   }
 
