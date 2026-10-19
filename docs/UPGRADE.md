@@ -176,6 +176,9 @@ resource and asking whether to include them.
 - Precedence: `iiif-content` > `manifest`.
 - `updateUrl()` uses `history.pushState` so the URL always reflects the current
   state (canvas, region, annotation) and is shareable; `popstate` re-initializes.
+- The canonical `iiif-content` is the **requested URI**, not the resource's
+  declared `@id` — some servers (e.g. T-PEN) declare an `@id` that returns an
+  empty body, so shareable URLs must point at the URI that actually loaded.
 - The old `?url=` and `?p=` parameters and the `#/read` hash route are **not**
   retained (per decision: no deprecated aliases).
 
