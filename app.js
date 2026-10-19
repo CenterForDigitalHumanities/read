@@ -161,7 +161,10 @@ class ReadViewer extends HTMLElement {
     try {
       const data = await fetchJSON(uri);
       const resource = normalize(data);
-      this.state.resource = resource;
+      // Keep the requested URI as the canonical id: the resource's declared
+      // @id may not be fetchable (e.g. T-PEN's /manifest/4080/manifest.json
+      // returns an empty body), and shareable URLs must point at a working URI.
+      this.state.resource = { ...resource, id: uri };
       this.state.canvasIndex = 0;
       if (resource.type === 'Collection') {
         this.updateUrl();
