@@ -1,0 +1,10 @@
+{
+  "name": "read",
+  "version": "2.0.0",
+  "description": "RERUM IIIF reader (Web Component)",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/"
+  }
+}
