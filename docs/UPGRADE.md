@@ -216,6 +216,11 @@ pre-hash query string, which Angular's `$location.search()` could not see.
 - Selecting an annotation (`selectAnnotation`) updates the URL and toggles the
   `focused` class **in place** — it does not re-render the viewer or re-crop the
   line images, so clicking through many segments stays fast.
+- `focusAnnotationElement` centers the selected annotation with a custom
+  `requestAnimationFrame` scroll animation (`smoothScrollTo`, ~200–500 ms
+  ease-in-out, cancels on rapid clicks). It does not rely on
+  `scrollIntoView({ behavior: 'smooth' })` or CSS `scroll-behavior`, which some
+  environments (e.g. `prefers-reduced-motion: reduce`) disable entirely.
 
 **Why**
 

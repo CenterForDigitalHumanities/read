@@ -305,7 +305,39 @@ class ReadViewer extends HTMLElement {
   focusAnnotationElement() {
     if (!this.state.focusAnnotation) return;
     const el = this.querySelector(`[data-anno="${CSS.escape(this.state.focusAnnotation)}"]`);
-    if (el) el.scrollIntoView({ block: 'center' });
+    if (el) this.smoothScrollTo(el);
+  }
+
+  smoothScrollTo(el) {
+    const scroller = this.scrollContainer(el);
+    const rect = el.getBoundingClientRect();
+    const sRect = scroller.getBoundingClientRect();
+    const viewport = scroller === document.scrollingElement ? window.innerHeight : sRect.height;
+    const target = scroller.scrollTop + rect.top - sRect.top - viewport / 2 + rect.height / 2;
+    const start = scroller.scrollTop;
+    const delta = target - start;
+    if (Math.abs(delta) < 1) return;
+    if (this._scrollAnim) cancelAnimationFrame(this._scrollAnim);
+    const duration = Math.min(500, Math.max(200, Math.abs(delta) * 0.4));
+    const t0 = performance.now();
+    const ease = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+    const step = (now) => {
+      const p = Math.min(1, (now - t0) / duration);
+      scroller.scrollTop = start + delta * ease(p);
+      if (p < 1) this._scrollAnim = requestAnimationFrame(step);
+      else this._scrollAnim = null;
+    };
+    this._scrollAnim = requestAnimationFrame(step);
+  }
+
+  scrollContainer(el) {
+    let node = el.parentElement;
+    while (node && node !== document.body) {
+      const style = getComputedStyle(node);
+      if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) return node;
+      node = node.parentElement;
+    }
+    return document.scrollingElement || document.documentElement;
   }
 
   async checkLdn() {

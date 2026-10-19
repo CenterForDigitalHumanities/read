@@ -397,6 +397,10 @@ img#backsplash {
     font-family: 'Junicode', serif;
 }
 
+.annotation {
+    transition: border-color 300ms ease, opacity 300ms ease;
+}
+
 .annotation:hover {
     opacity: 1;
 }
@@ -409,6 +413,7 @@ img#backsplash {
 .text-annotation {
     font-size: 1.2rem;
     perspective: 900px;
+    transition: background-color 300ms ease;
 }
 
 .text-annotation canvas, .text-annotation img {
