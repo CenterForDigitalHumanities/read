@@ -83,12 +83,12 @@ export function getMetadata(resource) {
   if (!md) return [];
   if (Array.isArray(md)) {
     return md.map((m) => ({
-      label: getLabel(m.label ?? m),
-      value: getLabel(m.value ?? m),
+      label: getLabel({ label: m.label ?? m }),
+      value: getLabel({ label: m.value ?? m }),
     }));
   }
   if (typeof md === 'object') {
-    return Object.entries(md).map(([k, v]) => ({ label: k, value: getLabel(v) }));
+    return Object.entries(md).map(([k, v]) => ({ label: k, value: getLabel({ label: v }) }));
   }
   return [];
 }

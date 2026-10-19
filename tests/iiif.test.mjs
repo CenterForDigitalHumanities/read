@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectVersion, normalize, getLabel, getSelector, getText } from '../iiif.js';
+import { detectVersion, normalize, getLabel, getMetadata, getSelector, getText } from '../iiif.js';
 
 const v2Manifest = {
   '@context': 'http://iiif.io/api/presentation/2/context.json',
@@ -181,6 +181,20 @@ test('getLabel handles language maps and arrays', () => {
   assert.equal(getLabel({ label: ['x', 'y'] }), 'x y');
   assert.equal(getLabel({ label: 'plain' }), 'plain');
   assert.equal(getLabel({}), '');
+});
+
+test('getMetadata handles language maps', () => {
+  const md = [
+    { label: { en: ['Author'] }, value: { en: ['Some value'] } },
+    { label: 'Date', value: '2020' },
+  ];
+  assert.deepEqual(getMetadata({ metadata: md }), [
+    { label: 'Author', value: 'Some value' },
+    { label: 'Date', value: '2020' },
+  ]);
+  assert.deepEqual(getMetadata({ metadata: { Author: { en: ['X'] } } }), [
+    { label: 'Author', value: 'X' },
+  ]);
 });
 
 test('getSelector handles string and object targets', () => {
