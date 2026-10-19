@@ -20,9 +20,3 @@ shareable URL:
 
 - `npm test` — run the unit tests (`node --test`)
 - No build step: edit the ES modules directly
-
-## Upgrading the similar AyBee viewer
-
-See [docs/UPGRADE.md](docs/UPGRADE.md) for a per-change checklist of everything
-in this upgrade and how to apply the same changes to
-[CenterForDigitalHumanities/aybee](https://github.com/CenterForDigitalHumanities/aybee).
