@@ -24,6 +24,7 @@ const TYPE_MAP = {
   'sc:AnnotationList': 'AnnotationPage',
   'oa:Annotation': 'Annotation',
   'oa:AnnotationCollection': 'AnnotationCollection',
+  'sc:AnnotationCollection': 'AnnotationCollection',
   'oa:AnnotationList': 'AnnotationPage',
 }
 
@@ -54,6 +55,8 @@ export function getLabel(resource) {
     return label.map((l) => l['@value'] ?? l.value ?? l).join(' ')
   }
   if (typeof label === 'object') {
+    // A lone v2 value object: { "@value": "x", "@language": "en" }
+    if ('@value' in label || 'value' in label) return String(label['@value'] ?? label.value ?? '')
     const first = Object.values(label)[0]
     if (Array.isArray(first)) return first.join(' ')
     if (first && typeof first === 'object') return first['@value'] ?? first.value ?? ''
@@ -70,6 +73,7 @@ export function getDescription(resource) {
     return desc.map((d) => d['@value'] ?? d.value ?? d).join(' ')
   }
   if (typeof desc === 'object') {
+    if ('@value' in desc || 'value' in desc) return String(desc['@value'] ?? desc.value ?? '')
     const first = Object.values(desc)[0]
     if (Array.isArray(first)) return first.join(' ')
     if (first && typeof first === 'object') return first['@value'] ?? first.value ?? ''
@@ -100,23 +104,40 @@ export function getText(body) {
   return body['cnt:chars'] ?? body.chars ?? body['@value'] ?? body.value ?? ''
 }
 
+function fragmentSelector(uri) {
+  const m = String(uri).match(/#xywh=([^#]+)/)
+  return m ? 'xywh=' + m[1] : null
+}
+
 export function getSelector(target) {
-  if (!target) return null
-  if (typeof target === 'string') {
-    const m = target.match(/#xywh=([^#]+)/)
-    return m ? 'xywh=' + m[1] : null
-  }
-  const sel = target.selector
+  const t = Array.isArray(target) ? target[0] : target
+  if (!t) return null
+  if (typeof t === 'string') return fragmentSelector(t)
+  const sel = [].concat(t.selector ?? []).filter(Boolean)[0]
   if (sel) {
     if (typeof sel === 'string') return sel
     if (sel.value) return sel.value
   }
-  const id = target.id ?? target['@id']
-  if (typeof id === 'string') {
-    const m = id.match(/#xywh=([^#]+)/)
-    return m ? 'xywh=' + m[1] : null
+  // A SpecificResource has no id of its own; the region may ride on the source.
+  const src = t.source ?? t.full
+  const refs = [t.id, t['@id'], typeof src === 'string' ? src : (src && (src.id ?? src['@id']))]
+  for (const ref of refs) {
+    if (typeof ref !== 'string') continue
+    const frag = fragmentSelector(ref)
+    if (frag) return frag
   }
   return null
+}
+
+// The URI of the resource an annotation targets, unwrapping SpecificResource
+// (v3/v4 `source`, v2 `full`) and array targets.
+export function targetSource(target) {
+  const t = Array.isArray(target) ? target[0] : target
+  if (!t) return ''
+  if (typeof t === 'string') return t
+  const src = t.source ?? t.full
+  if (src) return typeof src === 'string' ? src : (src.id ?? src['@id'] ?? '')
+  return t.id ?? t['@id'] ?? ''
 }
 
 export function normalizeAnnotation(anno, version) {
@@ -126,7 +147,7 @@ export function normalizeAnnotation(anno, version) {
   const motivation = anno.motivation ?? ''
   return {
     id,
-    target: typeof target === 'string' ? target : (target.id ?? target['@id'] ?? ''),
+    target: targetSource(target),
     selector: getSelector(target),
     text: getText(body),
     motivation: Array.isArray(motivation) ? motivation.join(',') : String(motivation ?? ''),
@@ -211,6 +232,14 @@ export function collectAnnotations(resource, version) {
     return list
   }
   const items = [].concat(resource.items || resource.resources || [])
+  // Paged AnnotationCollections point at their pages through first/next
+  // instead of listing items inline.
+  if (!items.length) {
+    const link = (v) => (typeof v === 'string' ? v : (v && (v.id ?? v['@id'])))
+    const first = link(resource.first)
+    if (first) list.push({ external: first })
+    return list
+  }
   for (const item of items) {
     if (!item) continue
     if (typeof item === 'string') {
@@ -219,7 +248,11 @@ export function collectAnnotations(resource, version) {
     }
     const t = normalizeType(item.type ?? item['@type'])
     if (t === 'Annotation') {
-      list.push(normalizeAnnotation(item, version))
+      const n = normalizeAnnotation(item, version)
+      // Stores like Rerum list annotations as { id, type } stubs. Without a
+      // target or body there is nothing to paint, so follow the id instead.
+      const stub = !item.target && !item.on && !item.body && !item.resource
+      list.push(stub && (item.id || item['@id']) ? { external: item.id ?? item['@id'] } : n)
     } else if (t === 'AnnotationPage' || t === 'AnnotationCollection') {
       list.push(...collectAnnotations(item, version))
     } else if (item.id || item['@id']) {
@@ -238,27 +271,28 @@ export function normalize(resource) {
     version,
     label: getLabel(resource),
     description: getDescription(resource),
-    descriptions: resource.description,
+    descriptions: resource.description ?? resource.summary,
     metadata: getMetadata(resource),
   }
   if (type === 'Collection') {
+    const ref = (m) => ({ id: m.id ?? m['@id'] ?? '', label: getLabel(m) })
+    const isCollection = (m) => normalizeType(m.type ?? m['@type']) === 'Collection'
+    // v2 splits members into manifests/collections; v3+ lists them in items.
+    const items = [].concat(resource.items || []).filter(Boolean)
     return {
       ...base,
-      manifests: [].concat(resource.manifests || []).map((m) => ({
-        id: m.id ?? m['@id'] ?? '',
-        label: getLabel(m),
-      })),
-      collections: [].concat(resource.collections || []).map((c) => ({
-        id: c.id ?? c['@id'] ?? '',
-        label: getLabel(c),
-      })),
+      manifests: [].concat(resource.manifests || [], items.filter((m) => !isCollection(m))).map(ref),
+      collections: [].concat(resource.collections || [], items.filter(isCollection)).map(ref),
     }
   }
   if (type === 'Canvas') {
     return { ...base, canvases: [normalizeCanvas(resource, version)] }
   }
   if (type === 'Annotation' || type === 'AnnotationPage' || type === 'AnnotationCollection') {
-    return { ...base, annotations: collectAnnotations(resource, version) }
+    const annotations = collectAnnotations(resource, version)
+    // A lone annotation has no label of its own; its text is the best title.
+    const label = base.label || (type === 'Annotation' ? getText(resource.body ?? resource.resource) : '')
+    return { ...base, label, annotations }
   }
   return { ...base, canvases: getCanvases(resource, version) }
 }

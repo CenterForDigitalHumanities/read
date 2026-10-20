@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { detectVersion, normalize, getLabel, getMetadata, getSelector, getText } from '../iiif.js'
+import { detectVersion, normalize, getLabel, getDescription, getMetadata, getSelector, getText, targetSource, normalizeAnnotation } from '../iiif.js'
 
 const v2Manifest = {
   '@context': 'http://iiif.io/api/presentation/2/context.json',
@@ -210,4 +210,158 @@ test('getText extracts chars/value', () => {
   assert.equal(getText({ value: 'c' }), 'c')
   assert.equal(getText('d'), 'd')
   assert.equal(getText(null), '')
+})
+
+test('targetSource unwraps SpecificResource, v2 on objects and arrays', () => {
+  assert.equal(targetSource('https://x/c'), 'https://x/c')
+  assert.equal(targetSource({ type: 'SpecificResource', source: 'https://x/canvas-1.json' }), 'https://x/canvas-1.json')
+  assert.equal(targetSource({ type: 'SpecificResource', source: { id: 'https://x/c2' } }), 'https://x/c2')
+  assert.equal(targetSource({ '@type': 'oa:SpecificResource', full: 'https://x/c3' }), 'https://x/c3')
+  assert.equal(targetSource([{ id: 'https://x/c4' }]), 'https://x/c4')
+  assert.equal(targetSource({ id: 'https://x/c5' }), 'https://x/c5')
+  assert.equal(targetSource(null), '')
+})
+
+test('normalizeAnnotation handles v3 SpecificResource targets', () => {
+  const n = normalizeAnnotation({
+    id: 'https://example.org/anno/sr',
+    type: 'Annotation',
+    motivation: 'tagging',
+    body: { type: 'TextualBody', value: 'a line' },
+    target: {
+      type: 'SpecificResource',
+      source: 'https://example.org/canvas-1.json',
+      selector: { type: 'FragmentSelector', value: 'xywh=pixel:1597,1562,2200,344' },
+    },
+  }, 3)
+  assert.equal(n.target, 'https://example.org/canvas-1.json')
+  assert.equal(n.selector, 'xywh=pixel:1597,1562,2200,344')
+  assert.equal(n.text, 'a line')
+})
+
+test('normalizeAnnotation handles v2 on objects and selector arrays', () => {
+  const n = normalizeAnnotation({
+    '@id': 'https://example.org/anno/v2',
+    '@type': 'oa:Annotation',
+    motivation: 'sc:painting',
+    on: {
+      '@type': 'oa:SpecificResource',
+      full: 'https://example.org/canvas/9',
+      selector: [{ '@type': 'oa:FragmentSelector', value: 'xywh=1,2,3,4' }],
+    },
+    resource: { '@type': 'cnt:ContentAsText', chars: 'v2 on object' },
+  }, 2)
+  assert.equal(n.target, 'https://example.org/canvas/9')
+  assert.equal(n.selector, 'xywh=1,2,3,4')
+})
+
+test('getSelector tolerates array targets', () => {
+  assert.equal(getSelector([{ id: 'https://x/c#xywh=5,6,7,8' }]), 'xywh=5,6,7,8')
+  assert.equal(getSelector({ type: 'SpecificResource', source: 'https://x/c#xywh=1,1,1,1' }), 'xywh=1,1,1,1')
+})
+
+test('normalize lists v3 Collection items as manifests and collections', () => {
+  const n = normalize({
+    '@context': 'http://iiif.io/api/presentation/3/context.json',
+    id: 'https://example.org/collection/1',
+    type: 'Collection',
+    label: { en: ['A Collection'] },
+    items: [
+      { id: 'https://example.org/manifest/a', type: 'Manifest', label: { en: ['Manifest A'] } },
+      { id: 'https://example.org/collection/nested', type: 'Collection', label: { en: ['Nested'] } },
+    ],
+  })
+  assert.equal(n.manifests.length, 1)
+  assert.equal(n.manifests[0].id, 'https://example.org/manifest/a')
+  assert.equal(n.manifests[0].label, 'Manifest A')
+  assert.equal(n.collections.length, 1)
+  assert.equal(n.collections[0].id, 'https://example.org/collection/nested')
+})
+
+test('normalize keeps v2 Collection manifests and collections arrays', () => {
+  const n = normalize({
+    '@context': 'http://iiif.io/api/presentation/2/context.json',
+    '@id': 'https://example.org/collection/2',
+    '@type': 'sc:Collection',
+    label: 'V2 Collection',
+    manifests: [{ '@id': 'https://example.org/manifest/b', '@type': 'sc:Manifest', label: 'Manifest B' }],
+    collections: [{ '@id': 'https://example.org/collection/n2', '@type': 'sc:Collection', label: 'Nested 2' }],
+  })
+  assert.equal(n.manifests[0].label, 'Manifest B')
+  assert.equal(n.collections[0].label, 'Nested 2')
+})
+
+test('collectAnnotations follows AnnotationCollection first', () => {
+  const n = normalize({
+    '@context': 'http://iiif.io/api/presentation/3/context.json',
+    id: 'https://example.org/ac/1',
+    type: 'AnnotationCollection',
+    total: 2,
+    first: { id: 'https://example.org/page/first', type: 'AnnotationPage' },
+  })
+  assert.deepEqual(n.annotations, [{ external: 'https://example.org/page/first' }])
+})
+
+test('collectAnnotations follows a first link given as a bare URI', () => {
+  const n = normalize({
+    '@context': 'http://iiif.io/api/presentation/3/context.json',
+    id: 'https://example.org/ac/2',
+    type: 'AnnotationCollection',
+    first: 'https://example.org/page/1',
+  })
+  assert.deepEqual(n.annotations, [{ external: 'https://example.org/page/1' }])
+})
+
+test('collectAnnotations fetches { id, type } stub annotations from a page', () => {
+  const n = normalize({
+    '@context': 'http://iiif.io/api/presentation/3/context.json',
+    id: 'https://example.org/page/1',
+    type: 'AnnotationPage',
+    items: [
+      { id: 'https://example.org/anno/1', type: 'Annotation' },
+      { id: 'https://example.org/anno/2', type: 'Annotation', body: { value: 'inline' }, target: 'https://example.org/c1' },
+    ],
+  })
+  assert.deepEqual(n.annotations[0], { external: 'https://example.org/anno/1' })
+  assert.equal(n.annotations[1].id, 'https://example.org/anno/2')
+  assert.equal(n.annotations[1].target, 'https://example.org/c1')
+})
+
+test('normalize keeps language maps for the description toggle', () => {  const v2 = normalize({
+    '@context': 'http://iiif.io/api/presentation/2/context.json',
+    '@id': 'https://example.org/m',
+    '@type': 'sc:Manifest',
+    label: 'L',
+    description: [{ '@language': 'en', '@value': 'English' }, { '@language': 'fr', '@value': 'Description francaise' }],
+  })
+  assert.deepEqual(v2.descriptions.map((d) => d['@language']), ['en', 'fr'])
+  assert.equal(v2.description, 'English Description francaise')
+  const v3 = normalize({
+    '@context': 'http://iiif.io/api/presentation/3/context.json',
+    id: 'https://example.org/m3',
+    type: 'Manifest',
+    label: 'L',
+    summary: { en: ['A summary'] },
+  })
+  assert.deepEqual(Object.keys(v3.descriptions), ['en'])
+})
+
+test('getLabel and getDescription read a lone v2 value object', () => {
+  const lone = { '@language': 'en', '@value': 'Only one' }
+  assert.equal(getLabel({ label: lone }), 'Only one')
+  assert.equal(getDescription({ description: lone }), 'Only one')
+  assert.equal(getLabel({ label: { value: 'Plain', language: 'en' } }), 'Plain')
+})
+
+test('v2 sc:AnnotationCollection normalizes as an annotation source', () => {
+  const n = normalize({
+    '@context': 'http://iiif.io/api/presentation/2/context.json',
+    '@id': 'https://example.org/ac/v2',
+    '@type': 'sc:AnnotationCollection',
+    label: 'V2 Collection of Pages',
+    first: { '@id': 'https://example.org/list/1' },
+  })
+  assert.equal(n.type, 'AnnotationCollection')
+  assert.equal(n.canvases, undefined)
+  assert.deepEqual(n.annotations, [{ external: 'https://example.org/list/1' }])
 })

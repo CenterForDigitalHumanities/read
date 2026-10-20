@@ -1,4 +1,4 @@
-﻿import { normalize, getLabel } from './iiif.js'
+import { normalize, getLabel } from './iiif.js'
 import { parseQuery, buildUrl } from './query.js'
 import { getInboxes, saveInboxes, getOptIn, setOptIn, queryInbox } from './ldn.js'
 import { escapeHtml, sanitizeHtml, parseXYWH, cropImage } from './utils.js'
@@ -7,8 +7,8 @@ const UNIVERSE_URL = 'https://ryanfb.github.io/iiif-universe/iiif-universe.json'
 const DEFAULT_INBOX = 'https://inbox.rerum.io/messages'
 
 async function fetchJSON(uri) {
-  if (/^http:\/\//i.test(uri)) {
-    throw new Error('HTTP sources are not supported; use an HTTPS URI.')
+  if (!/^https:\/\//i.test(String(uri))) {
+    throw new Error('Only HTTPS sources are supported; use an https:// URI.')
   }
   const res = await fetch(uri)
   if (!res.ok) throw new Error(`Failed to load ${uri}: ${res.status} ${res.statusText}`)
@@ -40,6 +40,7 @@ class ReadViewer extends HTMLElement {
   connectedCallback() {
     this.addEventListener('click', this.onClick)
     this.addEventListener('change', this.onChange)
+    this.addEventListener('keydown', this.onKeyDown)
     this.addEventListener('mouseover', this.onMouseOver)
     this.addEventListener('mouseleave', this.onMouseLeave)
     window.addEventListener('popstate', this.onPopState)
@@ -86,20 +87,16 @@ class ReadViewer extends HTMLElement {
         this.refresh()
         break
       case 'open-share':
-        this.state.shareOpen = true
-        this.render()
+        this.openModal('share')
         break
       case 'close-share':
-        this.state.shareOpen = false
-        this.render()
+        this.closeModal('share')
         break
       case 'open-settings':
-        this.state.settingsOpen = true
-        this.render()
+        this.openModal('settings')
         break
       case 'close-settings':
-        this.state.settingsOpen = false
-        this.render()
+        this.closeModal('settings')
         break
       case 'add-inbox':
         this.addInbox()
@@ -145,6 +142,43 @@ class ReadViewer extends HTMLElement {
       setOptIn(el.checked)
       if (el.checked) this.checkLdn()
     }
+  }
+
+  onKeyDown(event) {
+    if (event.key === 'Escape') {
+      if (this.state.shareOpen) this.closeModal('share')
+      else if (this.state.settingsOpen) this.closeModal('settings')
+      return
+    }
+    if (event.key === 'Enter' && event.target.matches?.('input')) {
+      if (event.target.id === 'resource-input') {
+        event.preventDefault()
+        this.loadFromInput()
+      } else if (event.target.id === 'new-inbox-input') {
+        event.preventDefault()
+        this.addInbox()
+      }
+      return
+    }
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    const el = event.target.closest('[data-action="select-annotation"]')
+    if (!el) return
+    event.preventDefault()
+    this.selectAnnotation(el.dataset.anno || null)
+  }
+
+  openModal(which) {
+    this.state.shareOpen = which === 'share'
+    this.state.settingsOpen = which === 'settings'
+    this.render()
+    this.querySelector('.modal input, .modal button')?.focus()
+  }
+
+  closeModal(which) {
+    this.state.shareOpen = false
+    this.state.settingsOpen = false
+    this.render()
+    this.querySelector(`[data-action="open-${which}"]`)?.focus()
   }
 
   onMouseOver(event) {
@@ -207,16 +241,20 @@ class ReadViewer extends HTMLElement {
       this.state.resource = { ...resource, id: uri }
       this.state.canvasIndex = 0
       if (resource.type === 'Collection') {
+        this.state.loading = false
         this.updateUrl()
         this.render()
         return
       }
       if (resource.type === 'Annotation' || resource.type === 'AnnotationPage' || resource.type === 'AnnotationCollection') {
         await this.resolveAnnotationResource(resource)
-      } else {
-        await this.loadExternalAnnotations(resource)
       }
+      // Landing on a single annotation should highlight it, not just its canvas.
+      if (resource.type === 'Annotation' && !query.annotation) this.state.focusAnnotation = resource.id
       if (query.canvas) this.selectCanvas(query.canvas, { silent: true })
+      // Paint once the current canvas is ready. Canvases the user has not
+      // visited yet pull their external annotation pages on demand.
+      await this.loadCanvasAnnotations(this.currentCanvas())
       this.refresh()
       this.focusAnnotationElement()
       this.checkLdn()
@@ -229,8 +267,32 @@ class ReadViewer extends HTMLElement {
   }
 
   async resolveAnnotationResource(resource) {
-    const annos = (resource.annotations || []).filter((a) => !a.external)
-    const external = (resource.annotations || []).filter((a) => a.external)
+    const annos = []
+    let wave = []
+    for (const a of (resource.annotations || [])) {
+      if (a.external) wave.push(a.external)
+      else annos.push(a)
+    }
+    // Resolve paged collections and stub references a page at a time: every
+    // link discovered in a wave is fetched in parallel, and the next/first
+    // links it hands back form the following wave.
+    const seen = new Set()
+    while (wave.length && seen.size < 50) {
+      const batch = wave.filter((uri) => uri && !seen.has(uri))
+      batch.forEach((uri) => seen.add(uri))
+      wave = []
+      const pages = await Promise.allSettled(batch.map((uri) => fetchJSON(uri)))
+      for (const p of pages) {
+        if (p.status !== 'fulfilled') continue
+        const data = p.value
+        for (const a of (normalize(data).annotations || [])) {
+          if (a.external) wave.push(a.external)
+          else annos.push(a)
+        }
+        const next = data.next ?? data.items?.next
+        if (next) wave.push(typeof next === 'string' ? next : (next.id ?? next['@id']))
+      }
+    }
     const byTarget = new Map()
     for (const a of annos) {
       if (!a.target) continue
@@ -238,57 +300,48 @@ class ReadViewer extends HTMLElement {
       if (!byTarget.has(key)) byTarget.set(key, [])
       byTarget.get(key).push(a)
     }
+    const targets = [...byTarget.entries()]
+    const fetched = await Promise.allSettled(targets.map(([uri]) => fetchJSON(uri)))
     const canvases = []
-    for (const [uri, list] of byTarget) {
-      try {
-        const data = await fetchJSON(uri)
-        const res = normalize(data)
-        if (res.type === 'Canvas') {
-          const c = res.canvases[0]
-          c.annotations.push(...list)
-          canvases.push(c)
-        } else if (res.type === 'Manifest') {
-          const c = res.canvases.find((cv) => cv.id === uri) || res.canvases[0]
-          if (c) {
-            c.annotations.push(...list)
-            canvases.push(c)
-          }
-        }
-      } catch {
-        /* skip unresolvable targets */
-      }
+    for (const [i, result] of fetched.entries()) {
+      if (result.status !== 'fulfilled') continue
+      const [, list] = targets[i]
+      const res = normalize(result.value)
+      const canvas =
+        res.type === 'Canvas'
+          ? res.canvases[0]
+          : res.type === 'Manifest'
+            ? res.canvases.find((cv) => cv.id === targets[i][0]) || res.canvases[0]
+            : null
+      if (!canvas) continue
+      canvas.annotations.push(...list)
+      canvases.push(canvas)
     }
-    for (const ext of external) {
-      try {
-        const data = await fetchJSON(ext.external)
-        const res = normalize(data)
-        for (const a of (res.annotations || [])) {
-          if (!a.target) continue
-          const key = a.target.split('#')[0]
-          const c = canvases.find((cv) => cv.id === key)
-          if (c) c.annotations.push(a)
-        }
-      } catch {
-        /* skip */
-      }
-    }
-    this.state.resource = { ...resource, canvases }
+    // Spread the live resource, not the normalized one, so the requested URI
+    // stays the canonical id used by shareable URLs.
+    this.state.resource = { ...this.state.resource, canvases }
   }
 
-  async loadExternalAnnotations(resource) {
-    for (const canvas of resource.canvases || []) {
-      for (const uri of canvas.externalAnnotations || []) {
-        try {
-          const data = await fetchJSON(uri)
-          const page = normalize(data)
-          for (const a of (page.annotations || [])) {
-            if (!a.external) canvas.annotations.push(a)
-          }
-        } catch {
-          /* skip */
-        }
+  currentCanvas() {
+    return (this.state.resource?.canvases || [])[this.state.canvasIndex] || null
+  }
+
+  async loadCanvasAnnotations(canvas) {
+    if (!canvas || canvas.externalLoaded) return
+    canvas.externalLoaded = true
+    const pages = await Promise.allSettled((canvas.externalAnnotations || []).map((uri) => fetchJSON(uri)))
+    for (const p of pages) {
+      if (p.status !== 'fulfilled') continue
+      for (const a of (normalize(p.value).annotations || [])) {
+        if (!a.external) canvas.annotations.push(a)
       }
     }
+  }
+
+  ensureCanvasAnnotations() {
+    const canvas = this.currentCanvas()
+    if (!canvas || canvas.externalLoaded) return
+    this.loadCanvasAnnotations(canvas).then(() => this.render())
   }
 
   selectCanvas(value, opts = {}) {
@@ -296,11 +349,12 @@ class ReadViewer extends HTMLElement {
     let index = -1
     if (/^\d+$/.test(value)) index = parseInt(value, 10)
     else index = canvases.findIndex((c) => c.id === value)
-    if (index > -1) this.state.canvasIndex = index
+    if (index > -1 && index < canvases.length) this.state.canvasIndex = index
     if (!opts.silent) {
       this.state.region = null
       this.state.focusAnnotation = null
       this.refresh()
+      this.ensureCanvasAnnotations()
       this.checkLdn()
     }
   }
@@ -313,6 +367,7 @@ class ReadViewer extends HTMLElement {
     this.state.region = null
     this.state.focusAnnotation = null
     this.refresh()
+    this.ensureCanvasAnnotations()
     this.checkLdn()
   }
 
@@ -334,12 +389,17 @@ class ReadViewer extends HTMLElement {
   updateUrl() {
     const r = this.state.resource
     if (!r) return
-    const params = { 'iiif-content': r.id, manifest: null }
     const canvas = (r.canvases || [])[this.state.canvasIndex]
-    if (canvas && canvas.id) params.canvas = canvas.id
-    if (this.state.region) params.region = this.state.region
-    if (this.state.focusAnnotation) params.annotation = this.state.focusAnnotation
-    history.pushState({}, '', buildUrl(window.location.href, params))
+    // Every shareable param is stated explicitly, including the ones that are
+    // now empty, so nothing stale survives a navigation.
+    const params = {
+      'iiif-content': r.id,
+      manifest: null,
+      canvas: canvas?.id || null,
+      region: this.state.region || null,
+      annotation: this.state.focusAnnotation || null,
+    }
+    history.pushState({}, '', buildUrl(window.location.pathname, params))
   }
 
   focusAnnotationElement() {
@@ -438,6 +498,12 @@ class ReadViewer extends HTMLElement {
       document.execCommand('copy')
       ta.remove()
     }
+    const status = this.querySelector('[role="status"]')
+    if (status) {
+      status.textContent = 'Copied'
+      clearTimeout(this._copyTimer)
+      this._copyTimer = setTimeout(() => { status.textContent = '' }, 2000)
+    }
   }
 
   async downloadCrop() {
@@ -515,14 +581,20 @@ class ReadViewer extends HTMLElement {
 
   getLanguages(r) {
     const d = r.descriptions
-    if (d && typeof d === 'object' && !Array.isArray(d)) return Object.keys(d)
+    // v2 lists { @value, @language } objects; v3/v4 use language maps.
+    if (Array.isArray(d)) return [...new Set(d.map((x) => x?.['@language']).filter(Boolean))]
+    if (d && typeof d === 'object') return Object.keys(d)
     return []
   }
 
   currentDescription(r) {
     const d = r.descriptions
-    if (d && typeof d === 'object' && !Array.isArray(d) && d[this.state.language] != null) {
-      return getLabel({ label: d[this.state.language] })
+    const lang = this.state.language
+    if (Array.isArray(d)) {
+      const match = d.find((x) => x?.['@language'] === lang)
+      if (match) return match['@value']
+    } else if (d && typeof d === 'object' && d[lang] != null) {
+      return getLabel({ label: d[lang] })
     }
     return r.description
   }
@@ -572,15 +644,18 @@ class ReadViewer extends HTMLElement {
   }
 
   collectionTemplate() {
-    const s = this.state
-    const r = s.resource
+    const r = this.state.resource
+    const links = (list) => (list || [])
+      .map((m) => `<p><a href="?iiif-content=${encodeURIComponent(m.id)}">${escapeHtml(m.label || m.id)}</a></p>`)
+      .join('')
     return `<div class="container">
       <div class="note u-see-thru">
         <h3 class="note-header text">${escapeHtml(r.label || '[ no label ]')}
           <button title="clear" class="button" data-action="clear"><i class="fa fa-bomb"></i></button>
         </h3>
         <div class="note-block">
-          ${(r.manifests || []).map((m) => `<p><a href="?iiif-content=${encodeURIComponent(m.id)}">${escapeHtml(m.label || m.id)}</a></p>`).join('') || '<p>[ no manifests ]</p>'}
+          ${links(r.manifests) || '<p>[ no manifests ]</p>'}
+          ${(r.collections || []).length ? `<h4>Collections</h4>${links(r.collections)}` : ''}
         </div>
       </div>
     </div>`
@@ -616,7 +691,7 @@ class ReadViewer extends HTMLElement {
       </div>
       <div style="position:relative;">
         <img id="backsplash" style="display:none;">
-        ${s.view === 'image' ? this.imageTemplate(canvas) : this.annotationsTemplate(canvas)}
+        ${!canvas ? '<p>[ no canvas to display ]</p>' : s.view === 'image' ? this.imageTemplate(canvas) : this.annotationsTemplate(canvas)}
       </div>
       ${this.ldnPanelTemplate()}
       ${s.shareOpen ? this.shareModalTemplate() : ''}
@@ -631,7 +706,7 @@ class ReadViewer extends HTMLElement {
     if (s.region) {
       return `<div class="region-view">
         <canvas data-crop="${escapeHtml(s.region)}" class="region-canvas"></canvas>
-        <p>Provenance: <a href="${escapeHtml(buildUrl(window.location.href, { 'iiif-content': s.resource.id, manifest: null }))}">view the full resource</a></p>
+        <p>Provenance: <a href="${escapeHtml(buildUrl(window.location.pathname, { 'iiif-content': s.resource.id, manifest: null }))}">view the full resource</a></p>
       </div>`
     }
     const overlays = (canvas.annotations || [])
@@ -644,7 +719,7 @@ class ReadViewer extends HTMLElement {
         const cls = ['annotation']
         if (a.source === 'ldn') cls.push('ldn-annotation')
         if (a.id && a.id === s.focusAnnotation) cls.push('focused')
-        return `<div class="${cls.join(' ')}" data-anno="${escapeHtml(a.id || '')}" data-action="select-annotation" data-uri="${escapeHtml(a.id || '')}" data-content="${escapeHtml(a.text || '')}" style="${style}"></div>`
+        return `<div class="${cls.join(' ')}" tabindex="0" role="button" aria-label="${escapeHtml(a.text || a.id || 'annotation')}" data-anno="${escapeHtml(a.id || '')}" data-action="select-annotation" data-uri="${escapeHtml(a.id || '')}" data-content="${escapeHtml(a.text || '')}" style="${style}"></div>`
       }).join('')
     return `<img class="canvas-image" src="${escapeHtml(image.id)}" alt="${escapeHtml(canvas.label || '')}">${overlays}`
   }
@@ -658,7 +733,7 @@ class ReadViewer extends HTMLElement {
           const cls = ['text-annotation']
           if (a.source === 'ldn') cls.push('ldn-annotation')
           if (a.id && a.id === s.focusAnnotation) cls.push('focused')
-          return `<div class="${cls.join(' ')}" data-anno="${escapeHtml(a.id || '')}" data-action="select-annotation" data-uri="${escapeHtml(a.id || '')}" data-content="${escapeHtml(a.text || '')}">
+          return `<div class="${cls.join(' ')}" tabindex="0" role="button" data-anno="${escapeHtml(a.id || '')}" data-action="select-annotation" data-uri="${escapeHtml(a.id || '')}" data-content="${escapeHtml(a.text || '')}">
             <div>
               ${a.label ? `<strong>${escapeHtml(a.label)}</strong> ` : ''}<span class="text">${sanitizeHtml(a.text)}</span>
               ${a.text ? '' : '<code>[ no transcription ]</code>'}
@@ -691,37 +766,41 @@ class ReadViewer extends HTMLElement {
     const anno = this.getFocusedAnnotation()
     const base = { 'iiif-content': r.id, manifest: null }
     if (canvas && canvas.id) base.canvas = canvas.id
+    // Share links are built from the pathname so params left over from the
+    // link that opened this page cannot leak into a new one.
+    const here = window.location.pathname
     const fullUrl = anno && anno.id
-      ? buildUrl(window.location.href, { ...base, annotation: anno.id })
-      : buildUrl(window.location.href, base)
+      ? buildUrl(here, { ...base, annotation: anno.id })
+      : buildUrl(here, base)
     const boundedUrl = anno && anno.selector
-      ? buildUrl(window.location.href, { ...base, region: anno.selector, annotation: anno.id })
+      ? buildUrl(here, { ...base, region: anno.selector, annotation: anno.id })
       : null
     const deepUrl = anno && anno.id
-      ? buildUrl(window.location.href, { 'iiif-content': anno.id, manifest: null })
+      ? buildUrl(here, { 'iiif-content': anno.id, manifest: null })
       : null
     return `<div class="modal-overlay" data-action="close-share">
-      <div class="modal">
-        <h3>Share</h3>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="share-title">
+        <h3 id="share-title">Share</h3>
         <p>${anno ? `Annotation: <code>${escapeHtml(anno.id || '')}</code>` : 'Current canvas'}</p>
         ${boundedUrl ? `<div class="share-option">
           <strong>Bounded area as image</strong>
-          <input readonly value="${escapeHtml(boundedUrl)}">
+          <input readonly aria-label="Bounded area link" value="${escapeHtml(boundedUrl)}">
           <button role="button" data-action="copy-bounded" data-url="${escapeHtml(boundedUrl)}">Copy</button>
           <button role="button" data-action="download-crop">Download PNG</button>
-          <small>Provenance: <a href="${escapeHtml(buildUrl(window.location.href, base))}">full resource</a></small>
+          <small>Provenance: <a href="${escapeHtml(buildUrl(window.location.pathname, base))}">full resource</a></small>
         </div>` : ''}
         <div class="share-option">
           <strong>${anno ? 'Full image with annotation selected' : 'Full image'}</strong>
-          <input readonly value="${escapeHtml(fullUrl)}">
+          <input readonly aria-label="${anno ? 'Full image link with annotation selected' : 'Full image link'}" value="${escapeHtml(fullUrl)}">
           <button role="button" data-action="copy-full" data-url="${escapeHtml(fullUrl)}">Copy</button>
         </div>
         ${deepUrl ? `<div class="share-option">
           <strong>Deep link to annotation</strong>
-          <input readonly value="${escapeHtml(deepUrl)}">
+          <input readonly aria-label="Deep link to annotation" value="${escapeHtml(deepUrl)}">
           <button role="button" data-action="copy-deep" data-url="${escapeHtml(deepUrl)}">Copy</button>
         </div>` : ''}
         <button role="button" data-action="close-share">Close</button>
+        <span role="status" class="copy-status"></span>
       </div>
     </div>`
   }
@@ -729,15 +808,15 @@ class ReadViewer extends HTMLElement {
   settingsModalTemplate() {
     const inboxes = getInboxes()
     return `<div class="modal-overlay" data-action="close-settings">
-      <div class="modal">
-        <h3>Settings</h3>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <h3 id="settings-title">Settings</h3>
         <label><input type="checkbox" data-action="ldn-optin" ${getOptIn() ? 'checked' : ''}> Include annotations from LDN inboxes</label>
         <h4>LDN Inboxes</h4>
         <ul class="inbox-list">
-          ${inboxes.map((i) => `<li>${escapeHtml(i)} <button role="button" data-action="remove-inbox" data-inbox="${escapeHtml(i)}">×</button></li>`).join('')}
+          ${inboxes.map((i) => `<li>${escapeHtml(i)} <button role="button" aria-label="Remove ${escapeHtml(i)}" data-action="remove-inbox" data-inbox="${escapeHtml(i)}">×</button></li>`).join('')}
         </ul>
         <div class="row">
-          <input type="url" id="new-inbox-input" placeholder="https://inbox.rerum.io/messages" class="six columns">
+          <input type="url" id="new-inbox-input" aria-label="New inbox URI" placeholder="https://inbox.rerum.io/messages" class="six columns">
           <button role="button" data-action="add-inbox">Add</button>
         </div>
         <button role="button" data-action="close-settings">Close</button>
@@ -753,15 +832,19 @@ class ReadViewer extends HTMLElement {
       const xywh = parseXYWH(el.dataset.crop)
       if (!xywh) continue
       const result = await cropImage(image.id, canvas.width, canvas.height, xywh)
+      // Canvas-coordinate width keeps the crop's aspect ratio; the stylesheet
+      // caps it at the container. A flat 100% would stretch narrow crops.
+      const displayWidth = `${xywh[2]}px`
       if (result.dataUrl) {
         const img = document.createElement('img')
         img.src = result.dataUrl
         img.alt = ''
+        img.style.width = displayWidth
+        img.style.maxWidth = '100%'
         el.replaceWith(img)
       } else if (result.canvas) {
-        result.canvas.style.width = '100%'
+        result.canvas.style.width = displayWidth
         result.canvas.style.maxWidth = '100%'
-        result.canvas.style.maxHeight = '100%'
         el.replaceWith(result.canvas)
       }
     }

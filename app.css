@@ -410,6 +410,38 @@ img#backsplash {
     border-color: #31b0d5;
 }
 
+/* overlays are invisible until hovered, so focus has to reveal them */
+.annotation:focus-visible {
+    opacity: 1;
+    outline: 2px solid #31b0d5;
+    outline-offset: 2px;
+}
+
+.text-annotation:focus-visible {
+    outline: 2px solid #31b0d5;
+    outline-offset: 2px;
+}
+
+.copy-status {
+    margin-left: .5rem;
+    font-style: italic;
+}
+
+/* self-contained: the viewer is embedded in hosts that may not ship alert styles */
+.alert {
+    padding: .75rem 1.25rem;
+    margin: 1rem 0;
+    border: 1px solid transparent;
+    border-radius: .25rem;
+    font-size: 1rem;
+}
+
+.alert-danger {
+    color: #843534;
+    background-color: #f2dede;
+    border-color: #ebccd1;
+}
+
 .text-annotation {
     font-size: 1.2rem;
     perspective: 900px;
