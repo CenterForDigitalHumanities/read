@@ -17,20 +17,16 @@ export function safeDecode(s) {
 
 export function parseQueryString(search) {
   const params = new URLSearchParams(search)
-  const get = (name) => {
-    const v = params.get(name)
-    return v === null ? null : v
-  }
   // URLSearchParams already decoded once. Decode again only when the value is
   // itself still an encoded URI ("https%3A%2F%2F..."), so that a single-encoded
   // URI containing %2F keeps its escapes instead of resolving to another path.
   const decodeUri = (v) => (v && /^https?%3A/i.test(v) ? safeDecode(v) : v)
   return {
-    iiifContent: decodeUri(get('iiif-content')),
-    manifest: decodeUri(get('manifest')),
-    canvas: get('canvas'),
-    region: get('region'),
-    annotation: get('annotation'),
+    iiifContent: decodeUri(params.get('iiif-content')),
+    manifest: decodeUri(params.get('manifest')),
+    canvas: params.get('canvas'),
+    region: params.get('region'),
+    annotation: params.get('annotation'),
   }
 }
 

@@ -6,7 +6,7 @@
  * inclusion, similar to the Mirador LDN plugin.
  */
 
-const DEFAULT_INBOX = 'https://inbox.rerum.io/messages'
+export const DEFAULT_INBOX = 'https://inbox.rerum.io/messages'
 const INBOXES_KEY = 'read.ldn.inboxes'
 const OPTIN_KEY = 'read.ldn.optin'
 
@@ -34,8 +34,10 @@ export function setOptIn(value) {
 
 export function extractMessages(data) {
   if (Array.isArray(data)) return data
-  if (data && Array.isArray(data.messages)) return data.messages
-  if (data && Array.isArray(data.items)) return data.items
+  // Rerum Inbox answers with an LDP container: { "@type": "ldp:Container", "contains": [...] }
+  for (const key of ['contains', 'ldp:contains', 'messages', 'items']) {
+    if (Array.isArray(data?.[key])) return data[key]
+  }
   return []
 }
 

@@ -52,6 +52,12 @@ export function sanitizeHtml(html) {
   return doc.body.innerHTML
 }
 
+// The words of an HTML fragment without its tags, for labels a screen reader
+// speaks.
+export function plainText(html) {
+  return new DOMParser().parseFromString(sanitizeHtml(html), 'text/html').body.textContent
+}
+
 export function parseXYWH(selector) {
   if (!selector) return null
   // FragmentSelector values may carry a unit prefix: xywh=pixel:1,2,3,4
@@ -60,7 +66,7 @@ export function parseXYWH(selector) {
   return [parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3]), parseFloat(m[4])]
 }
 
-export function cropImage(imageUrl, canvasWidth, canvasHeight, xywh) {
+export function cropImage(imageUrl, canvasWidth, xywh) {
   return new Promise((resolve) => {
     let usedCors = true
     const img = new Image()

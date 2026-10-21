@@ -1,10 +1,9 @@
 import { normalize, getLabel } from './iiif.js'
 import { parseQuery, buildUrl } from './query.js'
-import { getInboxes, saveInboxes, getOptIn, setOptIn, queryInbox } from './ldn.js'
-import { escapeHtml, sanitizeHtml, parseXYWH, cropImage } from './utils.js'
+import { DEFAULT_INBOX, getInboxes, saveInboxes, getOptIn, setOptIn, queryInbox } from './ldn.js'
+import { escapeHtml, sanitizeHtml, plainText, parseXYWH, cropImage } from './utils.js'
 
 const UNIVERSE_URL = 'https://ryanfb.github.io/iiif-universe/iiif-universe.json'
-const DEFAULT_INBOX = 'https://inbox.rerum.io/messages'
 
 async function fetchJSON(uri) {
   if (!/^https:\/\//i.test(String(uri))) {
@@ -58,6 +57,11 @@ class ReadViewer extends HTMLElement {
     } else if (q.manifest) {
       await this.loadResource(q.manifest, q)
     } else {
+      // Back to the bare address: show the landing page, not the last resource.
+      this.state.resource = null
+      this.state.error = null
+      this.state.region = null
+      this.state.focusAnnotation = null
       this.render()
       this.loadUniverse()
     }
@@ -79,12 +83,14 @@ class ReadViewer extends HTMLElement {
         this.moveCanvas(1)
         break
       case 'toggle-view':
+        // View and shading are not in the URL, so they add no history entry.
         this.state.view = this.state.view === 'image' ? 'annotations' : 'image'
-        this.refresh()
+        this.render()
+        this.focusAnnotationElement()
         break
       case 'toggle-block':
         this.state.block = !this.state.block
-        this.refresh()
+        this.render()
         break
       case 'open-share':
         this.openModal('share')
@@ -140,8 +146,12 @@ class ReadViewer extends HTMLElement {
       this.render()
     } else if (el.matches('[data-action="ldn-optin"]')) {
       setOptIn(el.checked)
-      // checkLdn re-renders the dialog, so put focus back on the checkbox.
-      if (el.checked) this.checkLdn().then(() => this.querySelector('[data-action="ldn-optin"]')?.focus())
+      // Opting out clears the panel too. Rendering replaces the dialog, so put
+      // focus back on the checkbox.
+      this.checkLdn().then(() => {
+        this.render()
+        this.querySelector('[data-action="ldn-optin"]')?.focus()
+      })
     }
   }
 
@@ -290,7 +300,7 @@ class ReadViewer extends HTMLElement {
           if (a.external) wave.push(a.external)
           else annos.push(a)
         }
-        const next = data.next ?? data.items?.next
+        const next = data.next
         if (next) wave.push(typeof next === 'string' ? next : (next.id ?? next['@id']))
       }
     }
@@ -444,6 +454,7 @@ class ReadViewer extends HTMLElement {
   }
 
   async checkLdn() {
+    this.state.ldn.results = []
     if (!getOptIn()) return
     const r = this.state.resource
     if (!r) return
@@ -453,21 +464,32 @@ class ReadViewer extends HTMLElement {
     const results = []
     for (const inbox of getInboxes()) {
       for (const target of targets) {
+        let messages = []
         try {
-          const messages = await queryInbox(inbox, target)
-          for (const m of messages) {
-            const res = normalize(m)
+          messages = await queryInbox(inbox, target)
+        } catch {
+          continue // skip unreachable inboxes
+        }
+        for (const m of messages) {
+          try {
+            // Rerum Inbox messages are Announce notifications that point at the resource.
+            const object = m.object ?? m['as:object']
+            const data = typeof object === 'string' ? await fetchJSON(object) : (object ?? m)
+            const res = normalize(data)
             if (res.type === 'Annotation' || res.type === 'AnnotationPage' || res.type === 'AnnotationCollection') {
               for (const a of (res.annotations || [])) {
-                if (!a.external) results.push({ ...a, source: 'ldn' })
+                // Only offer what belongs on the canvas being shown.
+                if (!a.external && a.target.split('#')[0] === canvas?.id) results.push({ ...a, source: 'ldn' })
               }
             }
+          } catch {
+            /* skip unreadable messages */
           }
-        } catch {
-          /* skip unreachable inboxes */
         }
       }
     }
+    // The canvas may have changed while the inboxes answered.
+    if (canvas !== this.currentCanvas()) return
     this.state.ldn.results = results
     this.state.ldn.checked = true
     this.render()
@@ -517,7 +539,7 @@ class ReadViewer extends HTMLElement {
     if (!image) return
     const xywh = parseXYWH(anno.selector)
     if (!xywh) return
-    const result = await cropImage(image.id, canvas.width, canvas.height, xywh)
+    const result = await cropImage(image.id, canvas.width, xywh)
     if (!result.dataUrl) return
     const a = document.createElement('a')
     a.href = result.dataUrl
@@ -605,7 +627,25 @@ class ReadViewer extends HTMLElement {
     return r.description
   }
 
+  // Re-rendering replaces every element, so put keyboard focus back on the
+  // control that had it.
   render() {
+    const active = this.contains(document.activeElement) ? document.activeElement : null
+    let selector = null
+    if (active?.id) selector = `#${CSS.escape(active.id)}`
+    else if (active?.dataset.action) {
+      selector = `[data-action="${active.dataset.action}"]`
+      if (active.type === 'radio') selector += `[value="${CSS.escape(active.value)}"]`
+    }
+    this.paint()
+    if (!selector) return
+    const el = this.querySelector(selector)
+    // Previous and Next are disabled at either end; keep focus in the toolbar.
+    if (el?.disabled) this.querySelector('[data-action="canvas-select"]')?.focus()
+    else el?.focus()
+  }
+
+  paint() {
     const s = this.state
     if (s.loading) {
       this.innerHTML = '<div class="container"><p>Loading…</p></div>'
@@ -712,7 +752,7 @@ class ReadViewer extends HTMLElement {
     if (s.region) {
       return `<div class="region-view">
         <canvas data-crop="${escapeHtml(s.region)}" class="region-canvas"></canvas>
-        <p>Provenance: <a href="${escapeHtml(buildUrl(window.location.pathname, { 'iiif-content': s.resource.id, manifest: null }))}">view the full resource</a></p>
+        <p>Provenance: <a href="${escapeHtml(buildUrl(window.location.pathname, { 'iiif-content': s.resource.id, manifest: null, canvas: canvas.id || null }))}">view the full resource</a></p>
       </div>`
     }
     const overlays = (canvas.annotations || [])
@@ -725,7 +765,7 @@ class ReadViewer extends HTMLElement {
         const cls = ['annotation']
         if (a.source === 'ldn') cls.push('ldn-annotation')
         if (a.id && a.id === s.focusAnnotation) cls.push('focused')
-        return `<div class="${cls.join(' ')}" tabindex="0" role="button" aria-label="${escapeHtml(a.text || a.id || 'annotation')}" data-anno="${escapeHtml(a.id || '')}" data-action="select-annotation" data-uri="${escapeHtml(a.id || '')}" data-content="${escapeHtml(a.text || '')}" style="${style}"></div>`
+        return `<div class="${cls.join(' ')}" tabindex="0" role="button" aria-label="${escapeHtml(plainText(a.text) || a.id || 'annotation')}" data-anno="${escapeHtml(a.id || '')}" data-action="select-annotation" data-uri="${escapeHtml(a.id || '')}" data-content="${escapeHtml(a.text || '')}" style="${style}"></div>`
       }).join('')
     return `<img class="canvas-image" src="${escapeHtml(image.id)}" alt="${escapeHtml(canvas.label || '')}">${overlays}`
   }
@@ -837,7 +877,7 @@ class ReadViewer extends HTMLElement {
     for (const el of this.querySelectorAll('[data-crop]')) {
       const xywh = parseXYWH(el.dataset.crop)
       if (!xywh) continue
-      const result = await cropImage(image.id, canvas.width, canvas.height, xywh)
+      const result = await cropImage(image.id, canvas.width, xywh)
       // Canvas-coordinate width keeps the crop's aspect ratio; the stylesheet
       // caps it at the container. A flat 100% would stretch narrow crops.
       const displayWidth = `${xywh[2]}px`
