@@ -1,6 +1,6 @@
 import { normalize, getLabel } from './iiif.js'
 import { parseQuery, buildUrl } from './query.js'
-import { DEFAULT_INBOX, getInboxes, saveInboxes, getOptIn, setOptIn, queryInbox } from './ldn.js'
+import { DEFAULT_INBOX, getInboxes, saveInboxes, getOptIn, setOptIn, queryInbox, isInboxUri } from './ldn.js'
 import { escapeHtml, sanitizeHtml, plainText, parseXYWH, cropImage } from './utils.js'
 
 const UNIVERSE_URL = 'https://ryanfb.github.io/iiif-universe/iiif-universe.json'
@@ -343,9 +343,20 @@ class ReadViewer extends HTMLElement {
     if (!canvas || canvas.externalLoaded) return
     canvas.externalLoaded = true
     const pages = await Promise.allSettled((canvas.externalAnnotations || []).map((uri) => fetchJSON(uri)))
+    // Stores like Rerum list a page's annotations as { id, type } stubs, so
+    // follow those ids to find something to paint.
+    const stubs = []
     for (const p of pages) {
       if (p.status !== 'fulfilled') continue
       for (const a of (normalize(p.value).annotations || [])) {
+        if (a.external) stubs.push(a.external)
+        else canvas.annotations.push(a)
+      }
+    }
+    const resolved = await Promise.allSettled(stubs.map((uri) => fetchJSON(uri)))
+    for (const r of resolved) {
+      if (r.status !== 'fulfilled') continue
+      for (const a of (normalize(r.value).annotations || [])) {
         if (!a.external) canvas.annotations.push(a)
       }
     }
@@ -462,6 +473,7 @@ class ReadViewer extends HTMLElement {
     const targets = [r.id]
     if (canvas && canvas.id) targets.push(canvas.id)
     const results = []
+    const seen = new Set()
     for (const inbox of getInboxes()) {
       for (const target of targets) {
         let messages = []
@@ -478,8 +490,11 @@ class ReadViewer extends HTMLElement {
             const res = normalize(data)
             if (res.type === 'Annotation' || res.type === 'AnnotationPage' || res.type === 'AnnotationCollection') {
               for (const a of (res.annotations || [])) {
-                // Only offer what belongs on the canvas being shown.
-                if (!a.external && a.target.split('#')[0] === canvas?.id) results.push({ ...a, source: 'ldn' })
+                // Only offer what belongs on the canvas being shown, once: the
+                // same message can answer both targets or come from several inboxes.
+                if (a.external || a.target.split('#')[0] !== canvas?.id || seen.has(a.id)) continue
+                if (a.id) seen.add(a.id)
+                results.push({ ...a, source: 'ldn' })
               }
             }
           } catch {
@@ -551,6 +566,11 @@ class ReadViewer extends HTMLElement {
     const input = this.querySelector('#new-inbox-input')
     const uri = input && input.value.trim()
     if (!uri) return
+    if (!isInboxUri(uri)) {
+      input.setCustomValidity('Enter an https:// inbox URI.')
+      input.reportValidity()
+      return
+    }
     const inboxes = getInboxes()
     if (!inboxes.includes(uri)) {
       inboxes.push(uri)

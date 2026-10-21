@@ -20,6 +20,16 @@ export function getInboxes() {
   return [DEFAULT_INBOX]
 }
 
+// The viewer is served over https, so any other inbox is blocked as mixed
+// content or is not a URL at all.
+export function isInboxUri(uri) {
+  try {
+    return new URL(uri).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 export function saveInboxes(list) {
   localStorage.setItem(INBOXES_KEY, JSON.stringify(list))
 }
