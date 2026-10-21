@@ -161,6 +161,15 @@ function isPainting(anno) {
   return motivations.includes('painting')
 }
 
+// The image a v3/v4 painting body shows. A SpecificResource body wraps the
+// image in `source`; its own id is not an image.
+function paintedImage(body) {
+  const b = Array.isArray(body) ? body[0] : body
+  if (!b || typeof b !== 'object') return null
+  if ((b.type ?? b['@type']) !== 'SpecificResource') return b
+  return typeof b.source === 'string' ? { id: b.source } : (b.source ?? null)
+}
+
 export function normalizeCanvas(canvas, version) {
   const id = canvas.id ?? canvas['@id'] ?? ''
   const images = []
@@ -184,7 +193,7 @@ export function normalizeCanvas(canvas, version) {
     for (const page of [].concat(canvas.items || [])) {
       for (const anno of [].concat(page.items || [])) {
         if (isPainting(anno)) {
-          const body = Array.isArray(anno.body) ? anno.body[0] : anno.body
+          const body = paintedImage(anno.body)
           if (body && typeof body === 'object') {
             images.push({ id: body.id ?? body['@id'] ?? '', service: body.service || null })
           }

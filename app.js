@@ -140,7 +140,8 @@ class ReadViewer extends HTMLElement {
       this.render()
     } else if (el.matches('[data-action="ldn-optin"]')) {
       setOptIn(el.checked)
-      if (el.checked) this.checkLdn()
+      // checkLdn re-renders the dialog, so put focus back on the checkbox.
+      if (el.checked) this.checkLdn().then(() => this.querySelector('[data-action="ldn-optin"]')?.focus())
     }
   }
 
@@ -314,7 +315,9 @@ class ReadViewer extends HTMLElement {
             ? res.canvases.find((cv) => cv.id === targets[i][0]) || res.canvases[0]
             : null
       if (!canvas) continue
-      canvas.annotations.push(...list)
+      // Show what was handed off. The canvas's own pages belong to other layers.
+      canvas.annotations = list
+      canvas.externalAnnotations = []
       canvases.push(canvas)
     }
     // Spread the live resource, not the normalized one, so the requested URI
@@ -531,13 +534,16 @@ class ReadViewer extends HTMLElement {
       inboxes.push(uri)
       saveInboxes(inboxes)
     }
+    // render() replaces the dialog; keep focus inside it so Escape still works.
     this.render()
+    this.querySelector('#new-inbox-input')?.focus()
   }
 
   removeInbox(uri) {
     const inboxes = getInboxes().filter((i) => i !== uri)
     saveInboxes(inboxes.length ? inboxes : [DEFAULT_INBOX])
     this.render()
+    this.querySelector('#new-inbox-input')?.focus()
   }
 
   async loadUniverse() {
@@ -672,7 +678,7 @@ class ReadViewer extends HTMLElement {
           <button title="clear" class="button" data-action="clear"><i class="fa fa-bomb"></i></button>
         </h3>
         <div class="note-block text">
-          ${escapeHtml(this.currentDescription(r))}
+          ${sanitizeHtml(this.currentDescription(r))}
           ${this.currentDescription(r) ? '' : '<code>[ no description ]</code>'}
           ${languages.length ? `<div class="btn-group u-full-width" data-toggle="buttons">${languages.map((l) => `<label class="btn btn-info ${s.language === l ? 'active' : ''}"><input type="radio" data-action="set-language" value="${escapeHtml(l)}" ${s.language === l ? 'checked' : ''}>${escapeHtml(l)}</label>`).join('')}</div>` : ''}
         </div>

@@ -161,6 +161,37 @@ test('normalize v4 manifest', () => {
   assert.equal(n.canvases[0].images[0].id, 'https://example.org/img/4/full/full/0/default.jpg')
 })
 
+test('normalize reads the image source of a SpecificResource painting body', () => {
+  const n = normalize({
+    '@context': 'http://iiif.io/api/presentation/3/context.json',
+    id: 'https://example.org/manifest/sr',
+    type: 'Manifest',
+    items: [{
+      id: 'https://example.org/canvas/sr',
+      type: 'Canvas',
+      width: 2105,
+      height: 1523,
+      items: [{
+        id: 'https://example.org/page/sr',
+        type: 'AnnotationPage',
+        items: [{
+          id: 'https://example.org/anno/sr',
+          type: 'Annotation',
+          motivation: 'painting',
+          body: {
+            id: 'https://example.org/body/sr',
+            type: 'SpecificResource',
+            source: { id: 'https://example.org/img/sr/full/max/0/default.jpg', type: 'Image' },
+            selector: { type: 'ImageApiSelector', rotation: '90' },
+          },
+          target: 'https://example.org/canvas/sr',
+        }],
+      }],
+    }],
+  })
+  assert.equal(n.canvases[0].images[0].id, 'https://example.org/img/sr/full/max/0/default.jpg')
+})
+
 test('normalize standalone v2 canvas', () => {
   const n = normalize(v2Canvas)
   assert.equal(n.type, 'Canvas')
