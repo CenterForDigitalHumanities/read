@@ -1,200 +1,920 @@
-/*
- * Read a manifest's transcription.
- * author: cubap@slu.edu
- */
-var rerum = angular.module('rerum', ['ui.bootstrap', 'ngRoute', 'ngSanitize', 'angular-loading-bar','utils']);
-rerum.config(['$routeProvider',
-    function ($routeProvider) {
-        $routeProvider
-            .when('/read', {
-                templateUrl: 'read.html',
-                controller: 'readManifestController',
-                resolve: {
-                    obj: function ($location, $http, rerumService) {
-                        // TODO: preload a known manifest from the URL or memory
-                        var mUrl = $location.search().url;
-                        var manifest = (mUrl && $http.get(mUrl?.replace(/^https?:/,'')).then(function (m) {
-                            // success
-                            rerumService.extractResources(m.data);
-                            return m.data;
-                        }, function (err) {
-                            // error
-                            return {
-                                error: err
-                            };
-                        })) || {};
-                        return manifest;
-                    },
-                    canvas: function ($location, $http, rerumService) {
-                        // TODO: preload a known manifest from the URL or memory
-                        var c = $location.search().p;
-                        return c || undefined;
-                    }
-                }
-            })
-            .otherwise(({ redirectTo: '/read' }));
-    }]);
-rerum.value('Terminal', false); // set Apple IIe style
-rerum.value('config', {
-    buffer: .05, // percent of canvas height
-    closeCrop: false, // show just enough around a slice to view
-    currentSequenceIndex: 0,
-    currentCanvasIndex: 0
-});
-rerum.value('Manifest', {});
-rerum.controller('mainController', function ($scope, $location) {
+import { normalize, getLabel } from './iiif.js'
+import { parseQuery, buildUrl } from './query.js'
+import { DEFAULT_INBOX, getInboxes, saveInboxes, getOptIn, setOptIn, queryInbox, isInboxUri } from './ldn.js'
+import { escapeHtml, sanitizeHtml, plainText, parseXYWH, cropImage } from './utils.js'
 
-});
+const UNIVERSE_URL = 'https://ryanfb.github.io/iiif-universe/iiif-universe.json'
 
-rerum.controller('readManifestController', function ($scope, $http, $sce, obj, canvas, rerumService) {
-    $scope.obj = obj;
-    $scope.screen = {
-        viewing: "image",
-        block: true,
-        language: "en",
-        backsplashStyle: "",
-        views: {
-            image: "annotations",
-            annotations: "image"
-        },
-        murl: ""
-    };
-    if (obj['@id']) {
-        $scope.screen.canvas = (canvas === undefined) ? $scope.obj.sequences[0].canvases[0] : $scope.obj.sequences[0].canvases[canvas];
-        angular.forEach(obj.sequences[0].canvases, function (canvas) {
-            var uri;
-            if (!canvas.otherContent || angular.isArray(canvas.otherContent[0].resources)) {
-                return false;
-            }
-            if (typeof canvas.otherContent[0] === "string") {
-                uri = canvas.otherContent[0];
-            } else if (!canvas.otherContent[0].resources && canvas.otherContent[0]['@id']) {
-                uri = canvas.otherContent[0]['@id'];
-            }
-            rerumService.resolveURI(uri).then(function (res) {
-                $scope.screen.canvas.otherContent[0] = canvas.otherContent[0] = res.data;
-            }, function (err) { });
-        });
-    }
-    $scope.trust = function (body) {
-        if (typeof body !== "string") {
-            body = $scope.getValue({body})
-        }
-        if (!body) { return `` }
-        return $sce.trustAsHtml(body);
-    };
+async function fetchJSON(uri) {
+  if (!/^https:\/\//i.test(String(uri))) {
+    throw new Error('Only HTTPS sources are supported; use an https:// URI.')
+  }
+  const res = await fetch(uri)
+  if (!res.ok) throw new Error(`Failed to load ${uri}: ${res.status} ${res.statusText}`)
+  return res.json()
+}
 
-    $scope.setDescription = function (desc, lang) {
-        $scope.screen.language = lang;
-        $scope.description = "";
-        if (!desc) {
-            return $scope.description;
-        }
-        if (angular.isArray(desc)) {
-            $scope.languages = [];
-            angular.forEach(desc, function (o, i) {
-                $scope.languages.push(o['@language']);
-                if (o['@language'] === lang) {
-                    $scope.description = o['@value'];
-                }
-            });
-            return $scope.description;
-        }
-        if (typeof $scope.description === "string") {
-            return $scope.description;
-        }
-        return $scope.description;
-    };
-    $scope.setDescription(obj.description, "en");
-    $scope.getStyle = function (on, canvas) {
-        var xywh = on.substring(on.indexOf("xywh=") + 5).split(",");
-        var height = canvas.height;
-        var width = canvas.width;
-        return {
-            left: xywh[0] / width * 100 + "%",
-            top: xywh[1] / height * 100 + "%",
-            height: xywh[3] / height * 100 + "%",
-            width: xywh[2] / width * 100 + "%"
-        };
-    };
-    $scope.moveBacksplash = function (on, canvas) {
-        var xywh = on.substring(on.indexOf("xywh=") + 5).split(",");
-        var height = canvas.height;
-        var width = canvas.width;
-        var ww = window.innerWidth;
-        var iw = ww * width / xywh[2]; // in pixels
-        var ih = iw * height / width;
-        var ratio = iw / width;
-        $scope.screen.backsplashStyle = {
-            left: -xywh[0] * ratio + "px",
-            top: -xywh[1] * ratio + "px",
-            width: iw + "px",
-            opacity: .6
-        };
-    };
-    $scope.hideBacksplash = function () {
-        $scope.screen.backsplashStyle = null;
-    };
-    $scope.cycleView = function () {
-        $scope.screen.viewing = $scope.screen.views[$scope.screen.viewing];
-    };
-    $scope.getUniverse = function () {
-        return $http.get('https://ryanfb.github.io/iiif-universe/iiif-universe.json').then(function (res) {
-            checkResponse(res.data);
-            $scope.universe = res.data;
-            if (!$scope.universe.collections || $scope.universe.collections.length === 0) {
-                showError({
-                    statusText: "Collections array is empty, but the call succeeded.",
-                    code: 200
-                });
-            }
-        }, function(err){ $scope.universe = null });
-    };
-    $scope.updateCollection = function (collectionID) {
-        $scope.collection = $http.get(collectionID).then(function (res) {
-            checkResponse(res.data);
-            if (res.data.manifests) {
-                $scope.collection = res.data;
-                if ($scope.collection.manifests.length === 0) {
-                    showError({
-                        statusText: "Manifests array is empty, but the call succeeded.",
-                        code: 200
-                    });
-                }
-            }
-            if (res.data.collections) {
-                $scope.universe = res.data;
-            }
-        }, showError);
-    };
-    $scope.getUniverse();
-    function showError(err) {
-        $scope.obj = {
-            status: "ERROR",
-            message: err.statusText,
-            code: err.status
-        };
+class ReadViewer extends HTMLElement {
+  constructor() {
+    super()
+    this.state = {
+      resource: null,
+      canvasIndex: 0,
+      view: 'image',
+      block: true,
+      language: 'en',
+      loading: false,
+      error: null,
+      universe: null,
+      collection: null,
+      ldn: { results: [], included: new Set(), checked: false },
+      shareOpen: false,
+      settingsOpen: false,
+      region: null,
+      focusAnnotation: null,
     }
-    function checkResponse(data) {
-        if (!data || Object.keys(data).length === 0) {
-            showError({
-                statusText: "The call succeeded but the response was empty.",
-                code: 200
-            });
+    this.onPopState = () => this.init()
+  }
+
+  connectedCallback() {
+    this.addEventListener('click', this.onClick)
+    this.addEventListener('change', this.onChange)
+    this.addEventListener('keydown', this.onKeyDown)
+    this.addEventListener('mouseover', this.onMouseOver)
+    this.addEventListener('mouseleave', this.onMouseLeave)
+    window.addEventListener('popstate', this.onPopState)
+    this.init()
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener('popstate', this.onPopState)
+  }
+
+  async init() {
+    const q = parseQuery()
+    if (q.iiifContent) {
+      await this.loadResource(q.iiifContent, q)
+    } else if (q.manifest) {
+      await this.loadResource(q.manifest, q)
+    } else {
+      // Back to the bare address: show the landing page, not the last resource.
+      this.state.resource = null
+      this.state.error = null
+      this.state.region = null
+      this.state.focusAnnotation = null
+      this.render()
+      this.loadUniverse()
+    }
+  }
+
+  onClick(event) {
+    const el = event.target.closest('[data-action]')
+    if (!el) return
+    const action = el.dataset.action
+    if ((action === 'close-share' || action === 'close-settings') && event.target !== el) return
+    switch (action) {
+      case 'load-input':
+        this.loadFromInput()
+        break
+      case 'prev-canvas':
+        this.moveCanvas(-1)
+        break
+      case 'next-canvas':
+        this.moveCanvas(1)
+        break
+      case 'toggle-view':
+        // View and shading are not in the URL, so they add no history entry.
+        this.state.view = this.state.view === 'image' ? 'annotations' : 'image'
+        this.render()
+        this.focusAnnotationElement()
+        break
+      case 'toggle-block':
+        this.state.block = !this.state.block
+        this.render()
+        break
+      case 'open-share':
+        this.openModal('share')
+        break
+      case 'close-share':
+        this.closeModal('share')
+        break
+      case 'open-settings':
+        this.openModal('settings')
+        break
+      case 'close-settings':
+        this.closeModal('settings')
+        break
+      case 'add-inbox':
+        this.addInbox()
+        break
+      case 'remove-inbox':
+        this.removeInbox(el.dataset.inbox)
+        break
+      case 'include-ldn':
+        this.includeLdn(el.dataset.anno)
+        break
+      case 'copy-bounded':
+      case 'copy-full':
+      case 'copy-deep':
+        this.copyLink(el.dataset.url)
+        break
+      case 'download-crop':
+        this.downloadCrop()
+        break
+      case 'reload-universe':
+        this.loadUniverse()
+        break
+      case 'clear':
+        this.clear()
+        break
+      case 'select-annotation':
+        this.selectAnnotation(el.dataset.anno || null)
+        break
+    }
+  }
+
+  onChange(event) {
+    const el = event.target
+    if (el.matches('[data-action="canvas-select"]')) {
+      this.selectCanvas(el.value)
+    } else if (el.matches('[data-action="collection-select"]')) {
+      this.loadCollection(el.value)
+    } else if (el.matches('[data-action="manifest-select"]')) {
+      if (el.value) this.loadResource(el.value, {})
+    } else if (el.matches('[data-action="set-language"]')) {
+      this.state.language = el.value
+      this.render()
+    } else if (el.matches('[data-action="ldn-optin"]')) {
+      setOptIn(el.checked)
+      // Opting out clears the panel too. Rendering replaces the dialog, so put
+      // focus back on the checkbox.
+      this.checkLdn().then(() => {
+        this.render()
+        this.querySelector('[data-action="ldn-optin"]')?.focus()
+      })
+    }
+  }
+
+  onKeyDown(event) {
+    if (event.key === 'Escape') {
+      if (this.state.shareOpen) this.closeModal('share')
+      else if (this.state.settingsOpen) this.closeModal('settings')
+      return
+    }
+    if (event.key === 'Enter' && event.target.matches?.('input')) {
+      if (event.target.id === 'resource-input') {
+        event.preventDefault()
+        this.loadFromInput()
+      } else if (event.target.id === 'new-inbox-input') {
+        event.preventDefault()
+        this.addInbox()
+      }
+      return
+    }
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    const el = event.target.closest('[data-action="select-annotation"]')
+    if (!el) return
+    event.preventDefault()
+    this.selectAnnotation(el.dataset.anno || null)
+  }
+
+  openModal(which) {
+    this.state.shareOpen = which === 'share'
+    this.state.settingsOpen = which === 'settings'
+    this.render()
+    this.querySelector('.modal input, .modal button')?.focus()
+  }
+
+  closeModal(which) {
+    this.state.shareOpen = false
+    this.state.settingsOpen = false
+    this.render()
+    this.querySelector(`[data-action="open-${which}"]`)?.focus()
+  }
+
+  onMouseOver(event) {
+    const el = event.target.closest('[data-anno]')
+    if (!el) {
+      this.hideBacksplash()
+      return
+    }
+    const canvas = (this.state.resource?.canvases || [])[this.state.canvasIndex]
+    if (!canvas) return
+    const anno = (canvas.annotations || []).find((a) => a.id === el.dataset.anno)
+    if (!anno || !anno.selector) return
+    const xywh = parseXYWH(anno.selector)
+    if (!xywh) return
+    const image = (canvas.images || [])[0]
+    if (!image) return
+    const backsplash = this.querySelector('#backsplash')
+    if (!backsplash) return
+    const [x, y, w, h] = xywh
+    const iw = window.innerWidth * canvas.width / w
+    const ratio = iw / canvas.width
+    backsplash.src = image.id
+    backsplash.style.display = 'block'
+    backsplash.style.left = (-x * ratio) + 'px'
+    backsplash.style.top = (-y * ratio) + 'px'
+    backsplash.style.width = iw + 'px'
+    backsplash.style.opacity = '0.6'
+  }
+
+  onMouseLeave() {
+    this.hideBacksplash()
+  }
+
+  hideBacksplash() {
+    const backsplash = this.querySelector('#backsplash')
+    if (backsplash) {
+      backsplash.style.display = 'none'
+      backsplash.style.opacity = '0'
+    }
+  }
+
+  loadFromInput() {
+    const input = this.querySelector('#resource-input')
+    const uri = input && input.value.trim()
+    if (uri) this.loadResource(uri, {})
+  }
+
+  async loadResource(uri, query = {}) {
+    this.state.loading = true
+    this.state.error = null
+    this.state.region = query.region || null
+    this.state.focusAnnotation = query.annotation || null
+    this.render()
+    try {
+      const data = await fetchJSON(uri)
+      const resource = normalize(data)
+      // Keep the requested URI as the canonical id: the resource's declared
+      // @id may not be fetchable (e.g. T-PEN's /manifest/4080/manifest.json
+      // returns an empty body), and shareable URLs must point at a working URI.
+      this.state.resource = { ...resource, id: uri }
+      this.state.canvasIndex = 0
+      if (resource.type === 'Collection') {
+        this.state.loading = false
+        this.updateUrl()
+        this.render()
+        return
+      }
+      if (resource.type === 'Annotation' || resource.type === 'AnnotationPage' || resource.type === 'AnnotationCollection') {
+        await this.resolveAnnotationResource(resource)
+      }
+      // Landing on a single annotation should highlight it, not just its canvas.
+      if (resource.type === 'Annotation' && !query.annotation) this.state.focusAnnotation = resource.id
+      if (query.canvas) this.selectCanvas(query.canvas, { silent: true })
+      // Paint once the current canvas is ready. Canvases the user has not
+      // visited yet pull their external annotation pages on demand.
+      await this.loadCanvasAnnotations(this.currentCanvas())
+      this.refresh()
+      this.focusAnnotationElement()
+      this.checkLdn()
+    } catch (err) {
+      this.state.error = err.message || String(err)
+    } finally {
+      this.state.loading = false
+    }
+    this.render()
+  }
+
+  async resolveAnnotationResource(resource) {
+    const annos = []
+    let wave = []
+    for (const a of (resource.annotations || [])) {
+      if (a.external) wave.push(a.external)
+      else annos.push(a)
+    }
+    // Resolve paged collections and stub references a page at a time: every
+    // link discovered in a wave is fetched in parallel, and the next/first
+    // links it hands back form the following wave.
+    const seen = new Set()
+    while (wave.length && seen.size < 50) {
+      const batch = wave.filter((uri) => uri && !seen.has(uri))
+      batch.forEach((uri) => seen.add(uri))
+      wave = []
+      const pages = await Promise.allSettled(batch.map((uri) => fetchJSON(uri)))
+      for (const p of pages) {
+        if (p.status !== 'fulfilled') continue
+        const data = p.value
+        for (const a of (normalize(data).annotations || [])) {
+          if (a.external) wave.push(a.external)
+          else annos.push(a)
         }
+        const next = data.next
+        if (next) wave.push(typeof next === 'string' ? next : (next.id ?? next['@id']))
+      }
     }
-    $scope.getValue = function (a) {
-        let val
-        let res = a.resource || a.body
-        if (!res) throw new Error("No annotation body detected")
-        if (!angular.isArray(res)) res = [res]
-        res.forEach(function (body) {
-            if (val) return // breakout after the first found for now
-            val = body['cnt:chars']
-                || body['chars']
-                || body['@value']
-                || body.value
-        })
-        return val
+    const byTarget = new Map()
+    for (const a of annos) {
+      if (!a.target) continue
+      const key = a.target.split('#')[0]
+      if (!byTarget.has(key)) byTarget.set(key, [])
+      byTarget.get(key).push(a)
     }
-});
+    const targets = [...byTarget.entries()]
+    const fetched = await Promise.allSettled(targets.map(([uri]) => fetchJSON(uri)))
+    const canvases = []
+    for (const [i, result] of fetched.entries()) {
+      if (result.status !== 'fulfilled') continue
+      const [, list] = targets[i]
+      const res = normalize(result.value)
+      const canvas =
+        res.type === 'Canvas'
+          ? res.canvases[0]
+          : res.type === 'Manifest'
+            ? res.canvases.find((cv) => cv.id === targets[i][0]) || res.canvases[0]
+            : null
+      if (!canvas) continue
+      // Show what was handed off. The canvas's own pages belong to other layers.
+      canvas.annotations = list
+      canvas.externalAnnotations = []
+      canvases.push(canvas)
+    }
+    // Spread the live resource, not the normalized one, so the requested URI
+    // stays the canonical id used by shareable URLs.
+    this.state.resource = { ...this.state.resource, canvases }
+  }
+
+  currentCanvas() {
+    return (this.state.resource?.canvases || [])[this.state.canvasIndex] || null
+  }
+
+  async loadCanvasAnnotations(canvas) {
+    if (!canvas || canvas.externalLoaded) return
+    canvas.externalLoaded = true
+    const pages = await Promise.allSettled((canvas.externalAnnotations || []).map((uri) => fetchJSON(uri)))
+    // Stores like Rerum list a page's annotations as { id, type } stubs, so
+    // follow those ids to find something to paint.
+    const stubs = []
+    for (const p of pages) {
+      if (p.status !== 'fulfilled') continue
+      for (const a of (normalize(p.value).annotations || [])) {
+        if (a.external) stubs.push(a.external)
+        else canvas.annotations.push(a)
+      }
+    }
+    const resolved = await Promise.allSettled(stubs.map((uri) => fetchJSON(uri)))
+    for (const r of resolved) {
+      if (r.status !== 'fulfilled') continue
+      for (const a of (normalize(r.value).annotations || [])) {
+        if (!a.external) canvas.annotations.push(a)
+      }
+    }
+  }
+
+  ensureCanvasAnnotations() {
+    const canvas = this.currentCanvas()
+    if (!canvas || canvas.externalLoaded) return
+    this.loadCanvasAnnotations(canvas).then(() => this.render())
+  }
+
+  selectCanvas(value, opts = {}) {
+    const canvases = this.state.resource?.canvases || []
+    let index = -1
+    if (/^\d+$/.test(value)) index = parseInt(value, 10)
+    else index = canvases.findIndex((c) => c.id === value)
+    if (index > -1 && index < canvases.length) this.state.canvasIndex = index
+    if (!opts.silent) {
+      this.state.region = null
+      this.state.focusAnnotation = null
+      this.refresh()
+      this.ensureCanvasAnnotations()
+      this.checkLdn()
+    }
+  }
+
+  moveCanvas(delta) {
+    const canvases = this.state.resource?.canvases || []
+    const next = this.state.canvasIndex + delta
+    if (next < 0 || next >= canvases.length) return
+    this.state.canvasIndex = next
+    this.state.region = null
+    this.state.focusAnnotation = null
+    this.refresh()
+    this.ensureCanvasAnnotations()
+    this.checkLdn()
+  }
+
+  refresh() {
+    this.updateUrl()
+    this.render()
+    this.focusAnnotationElement()
+  }
+
+  selectAnnotation(id) {
+    this.state.focusAnnotation = id || null
+    this.updateUrl()
+    for (const el of this.querySelectorAll('[data-anno]')) {
+      el.classList.toggle('focused', !!id && el.dataset.anno === id)
+    }
+    this.focusAnnotationElement()
+  }
+
+  updateUrl() {
+    const r = this.state.resource
+    if (!r) return
+    const canvas = (r.canvases || [])[this.state.canvasIndex]
+    // Every shareable param is stated explicitly, including the ones that are
+    // now empty, so nothing stale survives a navigation.
+    const params = {
+      'iiif-content': r.id,
+      manifest: null,
+      canvas: canvas?.id || null,
+      region: this.state.region || null,
+      annotation: this.state.focusAnnotation || null,
+    }
+    history.pushState({}, '', buildUrl(window.location.pathname, params))
+  }
+
+  focusAnnotationElement() {
+    if (!this.state.focusAnnotation) return
+    const el = this.querySelector(`[data-anno="${CSS.escape(this.state.focusAnnotation)}"]`)
+    if (el) this.smoothScrollTo(el)
+  }
+
+  smoothScrollTo(el) {
+    const scroller = this.scrollContainer(el)
+    const rect = el.getBoundingClientRect()
+    const sRect = scroller.getBoundingClientRect()
+    const viewport = scroller === document.scrollingElement ? window.innerHeight : sRect.height
+    const target = scroller.scrollTop + rect.top - sRect.top - viewport / 2 + rect.height / 2
+    const start = scroller.scrollTop
+    const delta = target - start
+    if (Math.abs(delta) < 1) return
+    if (this._scrollAnim) cancelAnimationFrame(this._scrollAnim)
+    const duration = Math.min(500, Math.max(200, Math.abs(delta) * 0.4))
+    const t0 = performance.now()
+    const ease = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
+    const step = (now) => {
+      const p = Math.min(1, (now - t0) / duration)
+      scroller.scrollTop = start + delta * ease(p)
+      if (p < 1) this._scrollAnim = requestAnimationFrame(step)
+      else this._scrollAnim = null
+    }
+    this._scrollAnim = requestAnimationFrame(step)
+  }
+
+  scrollContainer(el) {
+    let node = el.parentElement
+    while (node && node !== document.body) {
+      const style = getComputedStyle(node)
+      if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) return node
+      node = node.parentElement
+    }
+    return document.scrollingElement || document.documentElement
+  }
+
+  async checkLdn() {
+    this.state.ldn.results = []
+    if (!getOptIn()) return
+    const r = this.state.resource
+    if (!r) return
+    const canvas = (r.canvases || [])[this.state.canvasIndex]
+    const targets = [r.id]
+    if (canvas && canvas.id) targets.push(canvas.id)
+    const results = []
+    const seen = new Set()
+    for (const inbox of getInboxes()) {
+      for (const target of targets) {
+        let messages = []
+        try {
+          messages = await queryInbox(inbox, target)
+        } catch {
+          continue // skip unreachable inboxes
+        }
+        for (const m of messages) {
+          try {
+            // Rerum Inbox messages are Announce notifications that point at the resource.
+            const object = m.object ?? m['as:object']
+            const data = typeof object === 'string' ? await fetchJSON(object) : (object ?? m)
+            const res = normalize(data)
+            if (res.type === 'Annotation' || res.type === 'AnnotationPage' || res.type === 'AnnotationCollection') {
+              for (const a of (res.annotations || [])) {
+                // Only offer what belongs on the canvas being shown, once: the
+                // same message can answer both targets or come from several inboxes.
+                if (a.external || a.target.split('#')[0] !== canvas?.id || seen.has(a.id)) continue
+                if (a.id) seen.add(a.id)
+                results.push({ ...a, source: 'ldn' })
+              }
+            }
+          } catch {
+            /* skip unreadable messages */
+          }
+        }
+      }
+    }
+    // The canvas may have changed while the inboxes answered.
+    if (canvas !== this.currentCanvas()) return
+    this.state.ldn.results = results
+    this.state.ldn.checked = true
+    this.render()
+  }
+
+  includeLdn(annoId) {
+    const canvas = (this.state.resource?.canvases || [])[this.state.canvasIndex]
+    const anno = this.state.ldn.results.find((a) => a.id === annoId)
+    if (!canvas || !anno) return
+    if (!canvas.annotations.some((a) => a.id === annoId)) {
+      canvas.annotations.push({ ...anno, source: 'ldn' })
+    }
+    this.state.ldn.included.add(annoId)
+    this.refresh()
+  }
+
+  getFocusedAnnotation() {
+    const canvas = (this.state.resource?.canvases || [])[this.state.canvasIndex]
+    if (!canvas) return null
+    return (canvas.annotations || []).find((a) => a.id === this.state.focusAnnotation) || null
+  }
+
+  async copyLink(url) {
+    try {
+      await navigator.clipboard.writeText(url)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = url
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      ta.remove()
+    }
+    const status = this.querySelector('[role="status"]')
+    if (status) {
+      status.textContent = 'Copied'
+      clearTimeout(this._copyTimer)
+      this._copyTimer = setTimeout(() => { status.textContent = '' }, 2000)
+    }
+  }
+
+  async downloadCrop() {
+    const canvas = (this.state.resource?.canvases || [])[this.state.canvasIndex]
+    const anno = this.getFocusedAnnotation()
+    if (!canvas || !anno || !anno.selector) return
+    const image = (canvas.images || [])[0]
+    if (!image) return
+    const xywh = parseXYWH(anno.selector)
+    if (!xywh) return
+    const result = await cropImage(image.id, canvas.width, xywh)
+    if (!result.dataUrl) return
+    const a = document.createElement('a')
+    a.href = result.dataUrl
+    a.download = 'annotation.png'
+    a.click()
+  }
+
+  addInbox() {
+    const input = this.querySelector('#new-inbox-input')
+    const uri = input && input.value.trim()
+    if (!uri) return
+    if (!isInboxUri(uri)) {
+      input.setCustomValidity('Enter an https:// inbox URI.')
+      input.reportValidity()
+      return
+    }
+    const inboxes = getInboxes()
+    if (!inboxes.includes(uri)) {
+      inboxes.push(uri)
+      saveInboxes(inboxes)
+    }
+    // render() replaces the dialog; keep focus inside it so Escape still works.
+    this.render()
+    this.querySelector('#new-inbox-input')?.focus()
+  }
+
+  removeInbox(uri) {
+    const inboxes = getInboxes().filter((i) => i !== uri)
+    saveInboxes(inboxes.length ? inboxes : [DEFAULT_INBOX])
+    this.render()
+    this.querySelector('#new-inbox-input')?.focus()
+  }
+
+  async loadUniverse() {
+    try {
+      const res = await fetch(UNIVERSE_URL)
+      const data = await res.json()
+      this.state.universe = data
+      this.render()
+    } catch {
+      this.state.universe = null
+      this.render()
+    }
+  }
+
+  async loadCollection(collectionID) {
+    if (!collectionID) {
+      this.state.collection = null
+      this.render()
+      return
+    }
+    try {
+      const res = await fetch(collectionID)
+      const data = await res.json()
+      this.state.collection = data
+      this.render()
+    } catch (err) {
+      this.state.error = err.message || String(err)
+      this.render()
+    }
+  }
+
+  clear() {
+    this.state.resource = null
+    this.state.error = null
+    this.state.region = null
+    this.state.focusAnnotation = null
+    this.state.ldn = { results: [], included: new Set(), checked: false }
+    history.pushState({}, '', window.location.pathname)
+    this.render()
+  }
+
+  getLanguages(r) {
+    const d = r.descriptions
+    // v2 lists { @value, @language } objects; v3/v4 use language maps.
+    if (Array.isArray(d)) return [...new Set(d.map((x) => x?.['@language']).filter(Boolean))]
+    if (d && typeof d === 'object') return Object.keys(d)
+    return []
+  }
+
+  currentDescription(r) {
+    const d = r.descriptions
+    const lang = this.state.language
+    if (Array.isArray(d)) {
+      const match = d.find((x) => x?.['@language'] === lang)
+      if (match) return match['@value']
+    } else if (d && typeof d === 'object' && d[lang] != null) {
+      return getLabel({ label: d[lang] })
+    }
+    return r.description
+  }
+
+  // Re-rendering replaces every element, so put keyboard focus back on the
+  // control that had it.
+  render() {
+    const active = this.contains(document.activeElement) ? document.activeElement : null
+    let selector = null
+    if (active?.id) selector = `#${CSS.escape(active.id)}`
+    else if (active?.dataset.action) {
+      selector = `[data-action="${active.dataset.action}"]`
+      if (active.type === 'radio') selector += `[value="${CSS.escape(active.value)}"]`
+    }
+    this.paint()
+    if (!selector) return
+    const el = this.querySelector(selector)
+    // Previous and Next are disabled at either end; keep focus in the toolbar.
+    if (el?.disabled) this.querySelector('[data-action="canvas-select"]')?.focus()
+    else el?.focus()
+  }
+
+  paint() {
+    const s = this.state
+    if (s.loading) {
+      this.innerHTML = '<div class="container"><p>Loading…</p></div>'
+      return
+    }
+    if (!s.resource) {
+      this.innerHTML = this.landingTemplate()
+      return
+    }
+    if (s.resource.type === 'Collection') {
+      this.innerHTML = this.collectionTemplate()
+      return
+    }
+    this.innerHTML = this.viewerTemplate()
+    if (s.view === 'annotations' || s.region) this.hydrateCrops()
+  }
+
+  landingTemplate() {
+    const s = this.state
+    const u = s.universe
+    return `<div class="container">
+      <div class="row">
+        <input type="url" id="resource-input" placeholder="Paste or type a URI for any Manifest" class="six columns">
+        <button class="button" data-action="load-input">Load it</button>
+      </div>
+      ${u ? `<span>
+        <button role="button" class="button" data-action="reload-universe" title="reload universe"><i class="fa fa-globe fa-rotate-90"></i></button>
+        <select data-action="collection-select">
+          <option value="">${escapeHtml(u.label || 'IIIF Universe')}</option>
+          ${(u.collections || []).map((c) => `<option value="${escapeHtml(c['@id'] || c.id || '')}">${escapeHtml(c.label || c['@id'] || '')}</option>`).join('')}
+        </select>
+        ${s.collection && (s.collection.manifests || []).length ? `<select data-action="manifest-select">
+          <option value="">${escapeHtml(s.collection.label || 'Select a Manifest')}</option>
+          ${s.collection.manifests.map((m, i) => `<option value="${escapeHtml(m['@id'] || m.id || '')}">${escapeHtml(m.label || i)}</option>`).join('')}
+        </select>` : ''}
+      </span>` : ''}
+      <p>or try these examples:</p>
+      <a class="button" href="?iiif-content=${encodeURIComponent('https://t-pen.org/TPEN/manifest/4080')}">T-PEN (unauthorized)</a>
+      <a class="button" href="?iiif-content=${encodeURIComponent('https://www.e-codices.unifr.ch/metadata/iiif/bge-cl0015/manifest.json')}">e-codices (Classic IIIF, no text)</a>
+      ${s.error ? `<p class="alert alert-danger">${escapeHtml(s.error)}</p>` : ''}
+    </div>`
+  }
+
+  collectionTemplate() {
+    const r = this.state.resource
+    const links = (list) => (list || [])
+      .map((m) => `<p><a href="?iiif-content=${encodeURIComponent(m.id)}">${escapeHtml(m.label || m.id)}</a></p>`)
+      .join('')
+    return `<div class="container">
+      <div class="note u-see-thru">
+        <h3 class="note-header text">${escapeHtml(r.label || '[ no label ]')}
+          <button title="clear" class="button" data-action="clear"><i class="fa fa-bomb"></i></button>
+        </h3>
+        <div class="note-block">
+          ${links(r.manifests) || '<p>[ no manifests ]</p>'}
+          ${(r.collections || []).length ? `<h4>Collections</h4>${links(r.collections)}` : ''}
+        </div>
+      </div>
+    </div>`
+  }
+
+  viewerTemplate() {
+    const s = this.state
+    const r = s.resource
+    const canvas = (r.canvases || [])[s.canvasIndex]
+    const languages = this.getLanguages(r)
+    return `<div class="container">
+      <div class="note u-see-thru">
+        <h3 class="note-header text">${escapeHtml(r.label || '[ no label ]')}
+          <button title="clear" class="button" data-action="clear"><i class="fa fa-bomb"></i></button>
+        </h3>
+        <div class="note-block text">
+          ${sanitizeHtml(this.currentDescription(r))}
+          ${this.currentDescription(r) ? '' : '<code>[ no description ]</code>'}
+          ${languages.length ? `<div class="btn-group u-full-width" data-toggle="buttons">${languages.map((l) => `<label class="btn btn-info ${s.language === l ? 'active' : ''}"><input type="radio" data-action="set-language" value="${escapeHtml(l)}" ${s.language === l ? 'checked' : ''}>${escapeHtml(l)}</label>`).join('')}</div>` : ''}
+        </div>
+        ${r.metadata.length ? `<div class="note-block" style="max-height: 12rem;overflow: auto;"><dl>${r.metadata.map((m) => `<dt>${escapeHtml(m.label)}</dt><dd class="text">${sanitizeHtml(m.value)}</dd>`).join('')}</dl></div>` : ''}
+        <div class="btn-group note-footer">
+          <button role="button" data-action="prev-canvas" ${s.canvasIndex < 1 ? 'disabled' : ''}>previous</button>
+          <select data-action="canvas-select">
+            ${(r.canvases || []).map((c, i) => `<option value="${escapeHtml(c.id || i)}" ${i === s.canvasIndex ? 'selected' : ''}>${escapeHtml(c.label || c.id || i)}</option>`).join('')}
+          </select>
+          <button role="button" data-action="next-canvas" ${s.canvasIndex >= (r.canvases || []).length - 1 ? 'disabled' : ''}>next</button>
+          <button role="button" data-action="toggle-view">${s.view === 'image' ? 'annotations' : 'image'}</button>
+          ${s.view === 'annotations' ? `<button role="button" data-action="toggle-block">${s.block ? 'Shades' : 'Simple'}</button>` : ''}
+          <button role="button" data-action="open-share" title="Share"><i class="fa fa-share-alt"></i></button>
+          <button role="button" data-action="open-settings" title="Settings"><i class="fa fa-cog"></i></button>
+        </div>
+      </div>
+      <div style="position:relative;">
+        <img id="backsplash" style="display:none;">
+        ${!canvas ? '<p>[ no canvas to display ]</p>' : s.view === 'image' ? this.imageTemplate(canvas) : this.annotationsTemplate(canvas)}
+      </div>
+      ${this.ldnPanelTemplate()}
+      ${s.shareOpen ? this.shareModalTemplate() : ''}
+      ${s.settingsOpen ? this.settingsModalTemplate() : ''}
+    </div>`
+  }
+
+  imageTemplate(canvas) {
+    const s = this.state
+    const image = (canvas.images || [])[0]
+    if (!image) return '<p>[ no image found for this canvas ]</p>'
+    if (s.region) {
+      return `<div class="region-view">
+        <canvas data-crop="${escapeHtml(s.region)}" class="region-canvas"></canvas>
+        <p>Provenance: <a href="${escapeHtml(buildUrl(window.location.pathname, { 'iiif-content': s.resource.id, manifest: null, canvas: canvas.id || null }))}">view the full resource</a></p>
+      </div>`
+    }
+    const overlays = (canvas.annotations || [])
+      .filter((a) => a.selector && !a.external)
+      .map((a) => {
+        const xywh = parseXYWH(a.selector)
+        if (!xywh) return ''
+        const [x, y, w, h] = xywh
+        const style = `left:${(x / canvas.width) * 100}%;top:${(y / canvas.height) * 100}%;width:${(w / canvas.width) * 100}%;height:${(h / canvas.height) * 100}%;`
+        const cls = ['annotation']
+        if (a.source === 'ldn') cls.push('ldn-annotation')
+        if (a.id && a.id === s.focusAnnotation) cls.push('focused')
+        return `<div class="${cls.join(' ')}" tabindex="0" role="button" aria-label="${escapeHtml(plainText(a.text) || a.id || 'annotation')}" data-anno="${escapeHtml(a.id || '')}" data-action="select-annotation" data-uri="${escapeHtml(a.id || '')}" data-content="${escapeHtml(a.text || '')}" style="${style}"></div>`
+      }).join('')
+    return `<img class="canvas-image" src="${escapeHtml(image.id)}" alt="${escapeHtml(canvas.label || '')}">${overlays}`
+  }
+
+  annotationsTemplate(canvas) {
+    const s = this.state
+    const annos = (canvas.annotations || []).filter((a) => !a.external)
+    return `<div class="note u-see-thru ${s.block ? 'block' : ''}">
+      <div class="note-block">
+        ${annos.map((a) => {
+          const cls = ['text-annotation']
+          if (a.source === 'ldn') cls.push('ldn-annotation')
+          if (a.id && a.id === s.focusAnnotation) cls.push('focused')
+          return `<div class="${cls.join(' ')}" tabindex="0" role="button" data-anno="${escapeHtml(a.id || '')}" data-action="select-annotation" data-uri="${escapeHtml(a.id || '')}" data-content="${escapeHtml(a.text || '')}">
+            <div>
+              ${a.label ? `<strong>${escapeHtml(a.label)}</strong> ` : ''}<span class="text">${sanitizeHtml(a.text)}</span>
+              ${a.text ? '' : '<code>[ no transcription ]</code>'}
+            </div>
+            ${a.selector ? `<canvas data-crop="${escapeHtml(a.selector)}" class="crop-canvas"></canvas>` : ''}
+          </div>`
+        }).join('') || '<p>[ no annotations ]</p>'}
+      </div>
+    </div>`
+  }
+
+  ldnPanelTemplate() {
+    const s = this.state
+    if (!s.ldn.checked || !s.ldn.results.length) return ''
+    return `<div class="ldn-panel note">
+      <div class="note-header">LDN Inbox results (${s.ldn.results.length})</div>
+      <div class="note-block">
+        ${s.ldn.results.map((a) => `<div class="ldn-result">
+          <span class="text">${sanitizeHtml(a.text || a.id || '[ no text ]')}</span>
+          ${s.ldn.included.has(a.id) ? '<em>included</em>' : `<button role="button" data-action="include-ldn" data-anno="${escapeHtml(a.id || '')}">Include</button>`}
+        </div>`).join('')}
+      </div>
+    </div>`
+  }
+
+  shareModalTemplate() {
+    const s = this.state
+    const r = s.resource
+    const canvas = (r.canvases || [])[s.canvasIndex]
+    const anno = this.getFocusedAnnotation()
+    const base = { 'iiif-content': r.id, manifest: null }
+    if (canvas && canvas.id) base.canvas = canvas.id
+    // Share links are built from the pathname so params left over from the
+    // link that opened this page cannot leak into a new one.
+    const here = window.location.pathname
+    const fullUrl = anno && anno.id
+      ? buildUrl(here, { ...base, annotation: anno.id })
+      : buildUrl(here, base)
+    const boundedUrl = anno && anno.selector
+      ? buildUrl(here, { ...base, region: anno.selector, annotation: anno.id })
+      : null
+    const deepUrl = anno && anno.id
+      ? buildUrl(here, { 'iiif-content': anno.id, manifest: null })
+      : null
+    return `<div class="modal-overlay" data-action="close-share">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="share-title">
+        <h3 id="share-title">Share</h3>
+        <p>${anno ? `Annotation: <code>${escapeHtml(anno.id || '')}</code>` : 'Current canvas'}</p>
+        ${boundedUrl ? `<div class="share-option">
+          <strong>Bounded area as image</strong>
+          <input readonly aria-label="Bounded area link" value="${escapeHtml(boundedUrl)}">
+          <button role="button" data-action="copy-bounded" data-url="${escapeHtml(boundedUrl)}">Copy</button>
+          <button role="button" data-action="download-crop">Download PNG</button>
+          <small>Provenance: <a href="${escapeHtml(buildUrl(window.location.pathname, base))}">full resource</a></small>
+        </div>` : ''}
+        <div class="share-option">
+          <strong>${anno ? 'Full image with annotation selected' : 'Full image'}</strong>
+          <input readonly aria-label="${anno ? 'Full image link with annotation selected' : 'Full image link'}" value="${escapeHtml(fullUrl)}">
+          <button role="button" data-action="copy-full" data-url="${escapeHtml(fullUrl)}">Copy</button>
+        </div>
+        ${deepUrl ? `<div class="share-option">
+          <strong>Deep link to annotation</strong>
+          <input readonly aria-label="Deep link to annotation" value="${escapeHtml(deepUrl)}">
+          <button role="button" data-action="copy-deep" data-url="${escapeHtml(deepUrl)}">Copy</button>
+        </div>` : ''}
+        <button role="button" data-action="close-share">Close</button>
+        <span role="status" class="copy-status"></span>
+      </div>
+    </div>`
+  }
+
+  settingsModalTemplate() {
+    const inboxes = getInboxes()
+    return `<div class="modal-overlay" data-action="close-settings">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <h3 id="settings-title">Settings</h3>
+        <label><input type="checkbox" data-action="ldn-optin" ${getOptIn() ? 'checked' : ''}> Include annotations from LDN inboxes</label>
+        <h4>LDN Inboxes</h4>
+        <ul class="inbox-list">
+          ${inboxes.map((i) => `<li>${escapeHtml(i)} <button role="button" aria-label="Remove ${escapeHtml(i)}" data-action="remove-inbox" data-inbox="${escapeHtml(i)}">×</button></li>`).join('')}
+        </ul>
+        <div class="row">
+          <input type="url" id="new-inbox-input" aria-label="New inbox URI" placeholder="https://inbox.rerum.io/messages" class="six columns">
+          <button role="button" data-action="add-inbox">Add</button>
+        </div>
+        <button role="button" data-action="close-settings">Close</button>
+      </div>
+    </div>`
+  }
+
+  async hydrateCrops() {
+    const canvas = (this.state.resource?.canvases || [])[this.state.canvasIndex]
+    if (!canvas || !canvas.images[0]) return
+    const image = canvas.images[0]
+    for (const el of this.querySelectorAll('[data-crop]')) {
+      const xywh = parseXYWH(el.dataset.crop)
+      if (!xywh) continue
+      const result = await cropImage(image.id, canvas.width, xywh)
+      // Canvas-coordinate width keeps the crop's aspect ratio; the stylesheet
+      // caps it at the container. A flat 100% would stretch narrow crops.
+      const displayWidth = `${xywh[2]}px`
+      if (result.dataUrl) {
+        const img = document.createElement('img')
+        img.src = result.dataUrl
+        img.alt = ''
+        img.style.width = displayWidth
+        img.style.maxWidth = '100%'
+        el.replaceWith(img)
+      } else if (result.canvas) {
+        result.canvas.style.width = displayWidth
+        result.canvas.style.maxWidth = '100%'
+        el.replaceWith(result.canvas)
+      }
+    }
+  }
+}
+
+customElements.define('read-viewer', ReadViewer)
